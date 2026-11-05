@@ -1,0 +1,44 @@
+
+# Node.js / Frontend
+node_modules/
+dist/
+coverage/
+.vite/
+
+# Python / Backend
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Logs and temporary data
+*.log
+logs/
+tmp/
+temp/
+
+# Large generated files
+*.zip
+*.tar.gz
+*.pcap
+*.pcapng
+*.h5
+*.keras
+*.pt
+*.pth
+*.pkl
+*.joblib
