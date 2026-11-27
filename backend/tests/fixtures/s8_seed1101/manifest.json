@@ -1,0 +1,7 @@
+{
+  "scenario": "S8",
+  "seed": 1101,
+  "mode": "MITIGATE",
+  "model_sha256": "e409da09a80d8ca1d26f51fbc188d9a6b77f915c983cc1877685b8839d71dbe5",
+  "fixture_only": true
+}
