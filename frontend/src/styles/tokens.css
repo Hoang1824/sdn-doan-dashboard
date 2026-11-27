@@ -1,0 +1,20 @@
+:root {
+  color-scheme: dark;
+  --background: #0b111b;
+  --surface: #101824;
+  --surface-raised: #151f2d;
+  --sidebar: #0d141f;
+  --border: #233043;
+  --border-soft: #1d2939;
+  --text: #e1e8f2;
+  --muted: #93a1b6;
+  --dim: #7f8ea3;
+  --cyan: #43d5c7;
+  --blue: #729aff;
+  --amber: #e7b76d;
+  --red: #f27c87;
+  --green: #6cdbad;
+  --font-sans: 'Segoe UI', Inter, -apple-system, BlinkMacSystemFont, Arial, sans-serif;
+  --font-mono: 'Cascadia Code', Consolas, ui-monospace, monospace;
+  --sidebar-width: 224px;
+}
