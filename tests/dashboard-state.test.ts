@@ -17,6 +17,23 @@ const verifiedRule: MitigationRule = {
     observedAt: '2026-01-01T00:00:00.000Z',
   },
   updatedAt: '2026-01-01T00:00:00.000Z',
+  cookie: '0x-test',
+  dpid: 3,
+  sampleId: 'sample-test',
+  destinationIp: '192.0.2.100',
+  ipProtocol: 6,
+  packetCount: 1,
+  byteCount: 60,
+  counterDelta: null,
+  counterReset: false,
+  counterSource: 'verified_flow_stats',
+  removalReason: null,
+  eventId: 'event-test',
+  times: {
+    sourceTimestamp: '2026-01-01T00:00:00.000Z',
+    backendReceivedAt: '2026-01-01T00:00:00.000Z',
+    browserReceivedAt: '2026-01-01T00:00:00.000Z',
+  },
 }
 
 function snapshotWithMitigations(reported: number | null, rules: MitigationRule[]): DashboardSnapshot {
@@ -37,7 +54,13 @@ test('startup makes no measured-zero, detection or mitigation claims', () => {
     activeAlerts: null,
     verifiedSources: null,
     traffic: [],
+    dropCounterHistory: [],
+    dropCounterSampleCount: null,
+    dropCounterHistoryComplete: false,
   })
+  assert.equal(snapshot.predictionClassCounts, null)
+  assert.equal(snapshot.alertEventCount, null)
+  assert.equal(snapshot.alertHistoryComplete, false)
   assert.equal(snapshot.detection, null)
   assert.deepEqual(snapshot.alerts, [])
   assert.deepEqual(snapshot.mitigations, [])
@@ -45,6 +68,7 @@ test('startup makes no measured-zero, detection or mitigation claims', () => {
   assert.deepEqual(snapshot.performance, {
     detectionMs: null,
     mitigationMs: null,
+    mitigationSampleCount: null,
     roundTripMs: null,
   })
   for (const service of Object.values(snapshot.services)) {
@@ -137,6 +161,15 @@ test('verified source count counts a source only once across rules and switches'
   ]
   assert.equal(getVerifiedSourceCount(snapshotWithMitigations(1, rules)), 1)
   assert.equal(getVerifiedSourceCount(snapshotWithMitigations(3, rules)), null)
+})
+
+test('verified source count includes distinct VERIFIED and DROPPING sources only', () => {
+  const rules = [
+    { ...verifiedRule, status: 'verified' as const },
+    { ...verifiedRule, id: 'dropping-rule', sourceIp: '192.0.2.11', status: 'dropping' as const },
+    { ...verifiedRule, id: 'cleaned-rule', sourceIp: '192.0.2.12', status: 'cleaned' as const },
+  ]
+  assert.equal(getVerifiedSourceCount(snapshotWithMitigations(2, rules)), 2)
 })
 
 test('verified source count rejects invalid numeric aggregates', () => {
