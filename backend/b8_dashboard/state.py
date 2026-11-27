@@ -57,10 +57,26 @@ class B8StateReducer:
                 self._policies[sample_key] = deepcopy(event)
         elif kind.startswith("mitigation."):
             self._apply_rule(event)
-        elif kind in {"timeline.observation", "run.phase", "source.observation"}:
+        elif kind == "run.phase":
+            if self._has_timeline_phase_marker(event):
+                return True
+            self._phases.append(deepcopy(event))
+            self._phases = self._phases[-200:]
+        elif kind in {"timeline.observation", "source.observation"}:
             self._phases.append(deepcopy(event))
             self._phases = self._phases[-200:]
         return True
+
+    def _has_timeline_phase_marker(self, event: dict[str, Any]) -> bool:
+        phase = event["payload"].get("phase")
+        if phase is None:
+            return False
+        return any(
+            previous["source_stream"] == "timeline.jsonl"
+            and previous["raw_event"] == "PHA_KICH_BAN"
+            and previous["payload"].get("phase") == phase
+            for previous in self._phases
+        )
 
     def _apply_rule(self, event: dict[str, Any]) -> None:
         key = _rule_key(event)

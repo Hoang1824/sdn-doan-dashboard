@@ -66,6 +66,61 @@ def test_s8_fixture_counter_and_lifecycle_are_idempotent() -> None:
     )
 
 
+def test_snapshot_accepts_phase_state_records_without_event_and_deduplicates_marker(
+    tmp_path: Path,
+) -> None:
+    run_id = "run-phase"
+    run_dir = tmp_path / run_id
+    run_dir.mkdir()
+    (run_dir / "manifest.json").write_text(
+        json.dumps({"scenario": "S1", "seed": 701, "mode": "MITIGATE"}),
+        encoding="utf-8",
+    )
+    (run_dir / "timeline.jsonl").write_text(
+        json.dumps(
+            {
+                "event": "PHA_KICH_BAN",
+                "run_id": run_id,
+                "phase": "traffic",
+                "timestamp": 1795701900.0,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (run_dir / "events.jsonl").write_text(
+        json.dumps(
+            {
+                "schema_version": "1",
+                "run_id": run_id,
+                "phase_seq": 1,
+                "changed_at": "2026-11-27T15:25:00Z",
+                "phase": "traffic",
+                "traffic_mode": "mixed",
+                "status": "running",
+                "experiment_mode": "MITIGATE",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    with TestClient(create_app(tmp_path)) as client:
+        response = client.get(f"/api/runs/{run_id}/snapshot")
+
+    assert response.status_code == 200
+    snapshot = response.json()
+    observations = snapshot["state"]["observations"]
+
+    assert snapshot["run_id"] == run_id
+    assert snapshot["data_mode"] == "REPLAY"
+    assert snapshot["state"]["prediction_count"] == 0
+    assert snapshot["state"]["rules"] == []
+    assert len(observations) == 1
+    assert observations[0]["kind"] == "timeline.observation"
+    assert observations[0]["raw_event"] == "PHA_KICH_BAN"
+
+
 def test_timeline_counter_observation_does_not_mutate_drop_count() -> None:
     service = B8DashboardService(FIXTURES)
     snapshot = service.snapshot(S8_RUN, "REPLAY")

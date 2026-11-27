@@ -53,8 +53,20 @@ _FIELDS_BY_KIND = {
         "ip_proto", "action", "event",
     },
     "run.phase": {
-        "timestamp", "phase", "status", "stage", "event", "run_id",
+        "schema_version", "run_id", "phase_seq", "changed_at", "phase",
+        "traffic_mode", "status", "experiment_mode",
     },
+}
+
+_PHASE_STATE_FIELDS = {
+    "schema_version",
+    "run_id",
+    "phase_seq",
+    "changed_at",
+    "phase",
+    "traffic_mode",
+    "status",
+    "experiment_mode",
 }
 
 
@@ -122,13 +134,21 @@ def normalize_record(
     data_mode: str,
     cursor: str,
 ) -> dict[str, Any]:
-    raw_event = _raw_event_name(raw)
     if stream == "ryu_events.jsonl":
+        raw_event = _raw_event_name(raw)
         kind = _RYU_KINDS.get(raw_event, "source.observation")
     elif stream == "timeline.jsonl":
+        raw_event = _raw_event_name(raw)
         kind = "timeline.observation"
-    else:
+    elif stream == "events.jsonl":
+        missing_fields = _PHASE_STATE_FIELDS.difference(raw)
+        if missing_fields:
+            missing = ", ".join(sorted(missing_fields))
+            raise ValueError(f"events.jsonl phase-state record is missing fields: {missing}.")
+        raw_event = "run.phase"
         kind = "run.phase"
+    else:
+        raise ValueError(f"Unsupported JSONL source stream: {stream}.")
 
     source_run_id = raw.get("run_id")
     if source_run_id is not None and source_run_id != run_id:
@@ -148,7 +168,9 @@ def normalize_record(
         "kind": kind,
         "raw_event": raw_event,
         "source_stream": stream,
-        "source_timestamp": raw.get("timestamp"),
+        "source_timestamp": (
+            raw.get("changed_at") if stream == "events.jsonl" else raw.get("timestamp")
+        ),
         "backend_received_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "data_mode": data_mode,
         "policy_mode": _policy_mode(raw, manifest, kind),

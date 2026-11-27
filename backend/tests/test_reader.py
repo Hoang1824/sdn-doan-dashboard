@@ -120,3 +120,17 @@ def test_source_event_run_id_mismatch_is_rejected() -> None:
             data_mode="REPLAY",
             cursor="cursor",
         )
+
+
+def test_primary_ryu_record_still_requires_unambiguous_event_name() -> None:
+    with pytest.raises(ValueError, match="unambiguous event name"):
+        normalize_record(
+            run_id="run-a",
+            stream="ryu_events.jsonl",
+            offset=0,
+            identity="1:2",
+            raw={"run_id": "run-a", "id": "p1"},
+            manifest={},
+            data_mode="REPLAY",
+            cursor="cursor",
+        )
