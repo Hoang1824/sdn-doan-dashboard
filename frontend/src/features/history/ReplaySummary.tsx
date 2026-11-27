@@ -43,8 +43,14 @@ export function ReplaySummary({ snapshot }: { snapshot: DashboardSnapshot }) {
           <dd>{snapshot.predictionCount === null ? 'Chưa có dữ liệu' : formatMetric(snapshot.predictionCount)}</dd>
         </div>
         <div>
-          <dt>Phân bố benign / attack</dt>
-          <dd>Chưa có dữ liệu từ API</dd>
+          <dt>Phân bố lớp · toàn bộ prediction ID duy nhất</dt>
+          <dd>{snapshot.predictionClassCounts
+            ? `benign ${formatMetric(snapshot.predictionClassCounts.benign)} · syn_flood ${formatMetric(snapshot.predictionClassCounts.syn_flood)} · udp_flood ${formatMetric(snapshot.predictionClassCounts.udp_flood)}`
+            : 'Chưa có dữ liệu từ API'}</dd>
+        </div>
+        <div>
+          <dt>Sự kiện alert / mitigation trong run</dt>
+          <dd>{snapshot.alertEventCount === null ? 'Chưa có dữ liệu' : formatMetric(snapshot.alertEventCount)}</dd>
         </div>
         <div>
           <dt>DROP rules đã CONFIRMED+</dt>
@@ -74,9 +80,20 @@ export function ReplaySummary({ snapshot }: { snapshot: DashboardSnapshot }) {
         )}
       </div>
       <p className="replay-summary-note">
+        DROP counter samples: {snapshot.network.dropCounterSampleCount === null
+          ? 'chưa có dữ liệu'
+          : formatMetric(snapshot.network.dropCounterSampleCount)}
+        {!snapshot.network.dropCounterHistoryComplete && snapshot.network.dropCounterSampleCount !== null
+          ? ' · biểu đồ chỉ giữ tối đa 500 mẫu gần nhất'
+          : ''}
+        {snapshot.alertEventCount !== null && !snapshot.alertHistoryComplete
+          ? ' · danh sách alert hiển thị tối đa 100 event gần nhất'
+          : ''}
+      </p>
+      <p className="replay-summary-note">
         <ShieldCheck size={14} aria-hidden="true" />
         Counter là giá trị cuối của từng flow, không cộng các lần lấy mẫu. CLEANED là lịch sử đã gỡ, không phải đang chặn.
-        Phân bố lớp/accuracy không được suy ra từ latest policies hoặc prediction_count.
+        Confidence không phải accuracy; accuracy chỉ hiển thị khi có report đánh giá với tập mẫu và mẫu số đã xác minh.
       </p>
     </Panel>
   )

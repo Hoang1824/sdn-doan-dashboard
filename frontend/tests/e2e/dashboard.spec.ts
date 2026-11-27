@@ -57,6 +57,58 @@ test('startup stays honest, renders every module and allows chart/history contro
 test('run selection loads a final REPLAY snapshot without starting a live socket', async ({ page }) => {
   const requests: string[] = []
   const sockets: string[] = []
+  const wireEvent = (
+    eventId: string,
+    kind: string,
+    rawEvent: string,
+    payload: Record<string, unknown>,
+    sampleId: string | null = null,
+    cookie: string | null = null,
+  ) => ({
+    schema_version: 'b8.dashboard.v1',
+    run_id: 's8-run-final',
+    event_id: eventId,
+    cursor: `cursor-${eventId}`,
+    kind,
+    raw_event: rawEvent,
+    source_stream: 'ryu_events.jsonl',
+    source_timestamp: 1795701942.7,
+    backend_received_at: '2026-11-27T15:00:00Z',
+    data_mode: 'REPLAY',
+    policy_mode: 'MITIGATE',
+    run_revision: {},
+    keys: { sample_id: sampleId, cookie },
+    payload,
+  })
+  const attackEvent = wireEvent(
+    'attack-history',
+    'ai.prediction',
+    'v2_prediction',
+    { id: 'sample-attack', prediction: 'syn_flood', src_ip: '10.0.0.10' },
+    'sample-attack',
+  )
+  const confirmedEvent = wireEvent(
+    'confirmed-history',
+    'mitigation.confirmed',
+    'b8_mitigation_confirmed',
+    { src_ip: '10.0.0.10', dpid: 3, mitigation_action: 'DROP' },
+    'sample-attack',
+    '0xb83524a71b55e4bc',
+  )
+  const dropEvent = wireEvent(
+    'drop-history',
+    'mitigation.counter',
+    'b8_drop_counter',
+    {
+      src_ip: '10.0.0.10',
+      dpid: 3,
+      mitigation_action: 'DROP',
+      counter_source: 'verified_flow_stats',
+      packet_count: 142,
+    },
+    'sample-attack',
+    '0xb83524a71b55e4bc',
+  )
   await page.route('**/api/runs', route => route.fulfill({
     status: 200,
     contentType: 'application/json',
@@ -129,6 +181,24 @@ test('run selection loads a final REPLAY snapshot without starting a live socket
           }),
           verified_source_count: 0,
           observations: [],
+          prediction_class_counts: { benign: 5920, syn_flood: 5, udp_flood: 2 },
+          alert_event_count: 3,
+          alert_events: [attackEvent, confirmedEvent, dropEvent],
+          recent_events: [attackEvent, confirmedEvent, dropEvent],
+          drop_counter_sample_count: 1,
+          drop_counter_history: [{
+            event_id: 'drop-history',
+            timestamp: 1795701942.7,
+            cookie: '0xb83524a71b55e4bc',
+            dpid: 3,
+            src_ip: '10.0.0.10',
+            sample_id: 'sample-attack',
+            packet_count: 142,
+            delta: null,
+            counter_reset: false,
+          }],
+          mitigation_observation_ms: 50,
+          mitigation_observation_count: 1,
         },
       }),
     })
@@ -145,10 +215,11 @@ test('run selection loads a final REPLAY snapshot without starting a live socket
   await expect(page.getByText('S8 / 1101', { exact: true })).toBeVisible()
   await expect(page.getByText('REPLAY / HISTORY · snapshot', { exact: true })).toBeVisible()
   await expect(page.getByText('completed', { exact: true })).toBeVisible()
-  await expect(page.locator('.metric-value strong')).toHaveText(['—', '—', '—', '0'])
+  await expect(page.locator('.metric-value strong')).toHaveText(['—', '—', '3', '0'])
   await expect(page.locator('.replay-summary-grid dd')).toHaveText([
     '5,927',
-    'Chưa có dữ liệu từ API',
+    'benign 5,920 · syn_flood 5 · udp_flood 2',
+    '3',
     '6',
     '0',
   ])
@@ -159,13 +230,18 @@ test('run selection loads a final REPLAY snapshot without starting a live socket
   await expect(page.getByText(/Model: B7\.3\.5_TRIAL_3/)).toBeVisible()
   await expect(page.getByText('Accuracy mô hình')).toBeVisible()
   await expect(page.locator('#detection').getByText('Chưa có dữ liệu', { exact: true })).toBeVisible()
+  await expect(page.locator('#alerts')).toContainText('Lịch sử từ snapshot / REPLAY')
+  await expect(page.locator('#alerts')).toContainText('10.0.0.10')
+  await expect(page.locator('#alerts')).toContainText('0xb83524a71b55e4bc')
+  await expect(page.locator('.drop-counter-latest')).toContainText('142 packets lũy kế')
+  await expect(page.locator('#performance')).toContainText('50.0')
   const profileDetails = page.locator('.revision-details')
   await expect(profileDetails.locator('pre')).toBeHidden()
   await profileDetails.locator('summary').click()
   await expect(profileDetails.locator('pre')).toContainText('profile-details-marker')
   await expect(page.getByText('Không sử dụng (REPLAY)', { exact: true })).toBeVisible()
   await expect(page.getByText('Chưa giám sát trực tiếp', { exact: true })).toHaveCount(2)
-  await expect(page.getByText('Tóm lược snapshot, không phải toàn bộ event', { exact: false })).toBeVisible()
+  await expect(page.getByText('Tối đa 500 sự kiện Ryu/pha gần nhất', { exact: false })).toBeVisible()
   expect(requests).toHaveLength(1)
   expect(sockets).toEqual([])
 })

@@ -2,16 +2,23 @@ import type {
   AlertEvent,
   DashboardSnapshot,
   Detection,
+  DropCounterPoint,
   EventTimes,
   HistoryEvent,
   MitigationEvidence,
   MitigationRule,
   MitigationStatus,
+  PredictionClassCounts,
   PolicyDecision,
   RunMetadata,
 } from '../types/dashboard'
 import { scenarioLabel } from './b8-api.ts'
-import type { B8NormalizedEvent, B8RuleProjection, B8SnapshotResponse } from './b8-api.ts'
+import type {
+  B8DropCounterProjection,
+  B8NormalizedEvent,
+  B8RuleProjection,
+  B8SnapshotResponse,
+} from './b8-api.ts'
 import { getMitigationStatus } from './presentation.ts'
 import { createInitialSnapshot } from './initial-state.ts'
 
@@ -19,6 +26,7 @@ export const MAX_HISTORY_EVENTS = 500
 export const MAX_ALERT_EVENTS = 100
 export const MAX_POLICY_DECISIONS = 100
 export const MAX_MITIGATION_RULES = 500
+export const MAX_DROP_COUNTER_POINTS = 500
 const MAX_SEEN_EVENT_IDS = 50_000
 
 function stringValue(value: unknown): string | null {
@@ -112,16 +120,76 @@ function mapDetection(
   }
 }
 
-function mapAlert(event: B8NormalizedEvent, browserAt: string): AlertEvent | null {
+function mapAlert(
+  event: B8NormalizedEvent,
+  browserAt: string,
+  scope: AlertEvent['scope'],
+): AlertEvent | null {
   const label = eventText(event, 'prediction')
-  if (label !== 'syn_flood' && label !== 'udp_flood') return null
+  const action = eventText(event, 'mitigation_action')
+  const packetCount = numberValue(event.payload.packet_count)
+  const cookie = event.keys.cookie ?? eventText(event, 'cookie')
+  const dpidValue = event.payload.dpid
+  const dpid = typeof dpidValue === 'number' || typeof dpidValue === 'string'
+    ? dpidValue
+    : null
+  let category: AlertEvent['category']
+  let description: string
+
+  if (event.kind === 'ai.prediction' && (label === 'syn_flood' || label === 'udp_flood')) {
+    category = 'attack_prediction'
+    description = `AI prediction: ${label}`
+  } else if (event.kind === 'mitigation.requested' && action === 'DROP') {
+    category = 'mitigation_requested'
+    description = 'Controller requested DROP mitigation'
+  } else if (event.kind === 'mitigation.confirmed') {
+    category = 'mitigation_confirmed'
+    description = 'Controller confirmed mitigation; this is not switch verification'
+  } else if (
+    event.kind === 'mitigation.counter'
+    && action === 'DROP'
+    && event.payload.counter_source === 'verified_flow_stats'
+    && typeof event.source_timestamp === 'number'
+    && Number.isFinite(event.source_timestamp)
+    && packetCount !== null
+    && Number.isSafeInteger(packetCount)
+    && packetCount > 0
+    && cookie
+    && typeof dpid === 'number'
+    && Number.isInteger(dpid)
+    && dpid >= 0
+  ) {
+    category = 'drop_observed'
+    description = `DROP counter observed: ${packetCount.toLocaleString('en-US')} packets`
+  } else if (
+    event.kind === 'mitigation.removed'
+    && action === 'DROP'
+    && typeof event.source_timestamp === 'number'
+    && Number.isFinite(event.source_timestamp)
+    && packetCount !== null
+    && Number.isSafeInteger(packetCount)
+    && packetCount > 0
+    && cookie
+    && dpid !== null
+  ) {
+    category = 'drop_observed'
+    description = `FlowRemoved final count: ${packetCount.toLocaleString('en-US')} packets`
+  } else {
+    return null
+  }
+
   return {
     id: event.event_id,
     timestamp: sourceTimestamp(event.source_timestamp) ?? '',
     sourceIp: eventText(event, 'src_ip'),
-    description: `AI prediction: ${label}`,
+    description,
     severity: null,
-    confirmed: false,
+    category,
+    scope,
+    sampleId: event.keys.sample_id ?? eventText(event, 'sample_id'),
+    cookie,
+    dpid,
+    packetCount,
     times: makeTimes(event.source_timestamp, event.backend_received_at, browserAt),
   }
 }
@@ -236,6 +304,24 @@ function mapRuleHistory(rule: B8RuleProjection, browserAt: string): HistoryEvent
   }
 }
 
+function mapDropCounter(
+  sample: B8DropCounterProjection,
+): DropCounterPoint | null {
+  const timestamp = sourceTimestamp(sample.timestamp)
+  if (!timestamp) return null
+  return {
+    id: sample.event_id,
+    timestamp,
+    cookie: sample.cookie,
+    dpid: sample.dpid,
+    sourceIp: sample.src_ip,
+    sampleId: sample.sample_id,
+    packetCount: sample.packet_count,
+    delta: sample.delta,
+    counterReset: sample.counter_reset,
+  }
+}
+
 function uniqueHistory(events: readonly HistoryEvent[]): HistoryEvent[] {
   const unique = new Map<string, HistoryEvent>()
   for (const event of events) unique.set(event.id, event)
@@ -259,6 +345,12 @@ function runMetadata(snapshot: B8SnapshotResponse): RunMetadata {
   }
 }
 
+function terminalRunStatus(status: string | null): boolean {
+  return status !== null
+    && ['aborted', 'cancelled', 'canceled', 'complete', 'completed', 'failed']
+      .includes(status.trim().toLowerCase())
+}
+
 export function mapSnapshot(
   wire: B8SnapshotResponse,
   browserReceivedAt = new Date().toISOString(),
@@ -270,15 +362,33 @@ export function mapSnapshot(
     .slice(-MAX_POLICY_DECISIONS)
   const rules = wire.state.rules.slice(-MAX_MITIGATION_RULES)
   const latest = wire.state.latest_prediction
-  const latestAlert = latest ? mapAlert(latest, browserReceivedAt) : null
-  const histories = [
-    ...(latest ? [mapHistory(latest, browserReceivedAt)] : []),
-    ...wire.state.latest_policies.map((event) => mapHistory(event, browserReceivedAt)),
-    ...wire.state.observations.map((event) => mapHistory(event, browserReceivedAt)),
-    ...rules
-      .map((rule) => mapRuleHistory(rule, browserReceivedAt))
-      .filter((event): event is HistoryEvent => event !== null),
-  ]
+  const fallbackAlert = latest
+    ? mapAlert(latest, browserReceivedAt, 'historical')
+    : null
+  const alerts = wire.state.alert_events
+    ? wire.state.alert_events
+      .map((event) => mapAlert(event, browserReceivedAt, 'historical'))
+      .filter((alert): alert is AlertEvent => alert !== null)
+      .slice(-MAX_ALERT_EVENTS)
+    : fallbackAlert ? [fallbackAlert] : []
+  const histories = wire.state.recent_events
+    ? wire.state.recent_events.map((event) => mapHistory(event, browserReceivedAt))
+    : [
+      ...(latest ? [mapHistory(latest, browserReceivedAt)] : []),
+      ...wire.state.latest_policies.map((event) => mapHistory(event, browserReceivedAt)),
+      ...wire.state.observations.map((event) => mapHistory(event, browserReceivedAt)),
+      ...rules
+        .map((rule) => mapRuleHistory(rule, browserReceivedAt))
+        .filter((event): event is HistoryEvent => event !== null),
+    ]
+  const dropCounterHistory = (wire.state.drop_counter_history ?? [])
+    .map(mapDropCounter)
+    .filter((point): point is DropCounterPoint => point !== null)
+    .slice(-MAX_DROP_COUNTER_POINTS)
+  const predictionClassCounts: PredictionClassCounts | null =
+    wire.state.prediction_class_counts
+      ? { ...wire.state.prediction_class_counts }
+      : null
 
   return {
     ...initial,
@@ -290,6 +400,10 @@ export function mapSnapshot(
     predictionCount: Number.isSafeInteger(wire.state.prediction_count) && wire.state.prediction_count >= 0
       ? wire.state.prediction_count
       : null,
+    predictionClassCounts,
+    alertEventCount: wire.state.alert_event_count,
+    alertHistoryComplete: wire.state.alert_event_count !== null
+      && wire.state.alert_event_count === alerts.length,
     policies,
     mitigationsComplete: wire.state.rules.length <= MAX_MITIGATION_RULES,
     network: {
@@ -298,11 +412,20 @@ export function mapSnapshot(
         && wire.state.verified_source_count >= 0
         ? wire.state.verified_source_count
         : null,
+      dropCounterHistory,
+      dropCounterSampleCount: wire.state.drop_counter_sample_count,
+      dropCounterHistoryComplete: wire.state.drop_counter_sample_count !== null
+        && wire.state.drop_counter_sample_count === dropCounterHistory.length,
     },
     detection: latest ? mapDetection(latest, browserReceivedAt, wire.run.revision) : null,
-    alerts: latestAlert ? [latestAlert] : [],
+    alerts,
     mitigations: rules.map((rule) => mapRule(rule, browserReceivedAt)),
     history: uniqueHistory(histories),
+    performance: {
+      ...initial.performance,
+      mitigationMs: wire.state.mitigation_observation_ms,
+      mitigationSampleCount: wire.state.mitigation_observation_count,
+    },
     services: {
       dashboardApi: { status: 'connected', updatedAt: browserReceivedAt },
       ai: initial.services.ai,
@@ -342,6 +465,41 @@ function validCounterEvidence(
   const observedAt = sourceTimestamp(timestamp)
   if (!observedAt) return null
   return { source: 'controller', reference: event.event_id, observedAt }
+}
+
+function mapCounterEvent(
+  event: B8NormalizedEvent,
+  rule: MitigationRule,
+): DropCounterPoint | null {
+  const packetCount = numberValue(event.payload.packet_count)
+  const cookie = event.keys.cookie ?? stringValue(event.payload.cookie)
+  const dpid = event.payload.dpid
+  if (
+    event.kind !== 'mitigation.counter'
+    || event.payload.mitigation_action !== 'DROP'
+    || !cookie
+    || typeof dpid !== 'number'
+    || !Number.isInteger(dpid)
+    || dpid < 0
+    || packetCount === null
+    || !Number.isSafeInteger(packetCount)
+    || packetCount < 0
+    || !validCounterEvidence(event, rule, packetCount)
+  ) return null
+
+  const timestamp = sourceTimestamp(event.source_timestamp)
+  if (!timestamp) return null
+  return {
+    id: event.event_id,
+    timestamp,
+    cookie,
+    dpid,
+    sourceIp: stringValue(event.payload.src_ip),
+    sampleId: event.keys.sample_id,
+    packetCount,
+    delta: rule.counterReset ? null : rule.counterDelta,
+    counterReset: rule.counterReset,
+  }
 }
 
 function updateCounter(
@@ -477,19 +635,26 @@ function addHistory(
   return [...history, mapHistory(event, browserAt)].slice(-MAX_HISTORY_EVENTS)
 }
 
+function hasAlert(alerts: readonly AlertEvent[], alert: AlertEvent): boolean {
+  if (alerts.some((item) => item.id === alert.id)) return true
+  return alert.category === 'drop_observed' && alerts.some((item) => (
+    item.category === 'drop_observed'
+    && item.cookie === alert.cookie
+    && String(item.dpid) === String(alert.dpid)
+  ))
+}
+
 function addAlert(
   alerts: readonly AlertEvent[],
-  event: B8NormalizedEvent,
-  browserAt: string,
+  alert: AlertEvent,
 ): AlertEvent[] {
-  const alert = mapAlert(event, browserAt)
-  if (!alert) return [...alerts]
-  return [...alerts.filter((item) => item.id !== alert.id), alert].slice(-MAX_ALERT_EVENTS)
+  return [...alerts, alert].slice(-MAX_ALERT_EVENTS)
 }
 
 export class B8DashboardReducer {
   private current: DashboardSnapshot
   private readonly seenEventIds = new Set<string>()
+  private readonly seenPredictionIds = new Set<string>()
 
   constructor(initial: DashboardSnapshot) {
     this.current = initial
@@ -498,6 +663,7 @@ export class B8DashboardReducer {
   reset(snapshot: DashboardSnapshot): void {
     this.current = snapshot
     this.seenEventIds.clear()
+    this.seenPredictionIds.clear()
   }
 
   currentSnapshot(): DashboardSnapshot {
@@ -510,17 +676,63 @@ export class B8DashboardReducer {
       throw new Error('B8 event run_id does not match the selected dashboard run.')
     }
 
+    const predictionId = event.kind === 'ai.prediction'
+      ? event.keys.sample_id ?? eventText(event, 'id')
+      : null
+    const duplicatePrediction = predictionId !== null
+      && this.seenPredictionIds.has(predictionId)
+    if (predictionId !== null) this.seenPredictionIds.add(predictionId)
+
     let next: DashboardSnapshot = {
       ...this.current,
       receivedAt: browserAt,
-      history: addHistory(this.current.history, event, browserAt),
+      history: event.source_stream === 'ryu_events.jsonl' || event.kind === 'run.phase'
+        ? addHistory(this.current.history, event, browserAt)
+        : this.current.history,
+    }
+
+    const scope: AlertEvent['scope'] = this.current.dataMode === 'LIVE'
+      && this.current.runLiveStatus?.terminal !== true
+      && !terminalRunStatus(this.current.run?.status ?? null)
+      ? 'live'
+      : 'historical'
+    const candidateAlert = duplicatePrediction
+      ? null
+      : mapAlert(event, browserAt, scope)
+    if (candidateAlert && !hasAlert(this.current.alerts, candidateAlert)) {
+      const alerts = addAlert(this.current.alerts, candidateAlert)
+      const alertEventCount = this.current.alertEventCount === null
+        ? null
+        : this.current.alertEventCount + 1
+      next = {
+        ...next,
+        alerts,
+        alertEventCount,
+        alertHistoryComplete: this.current.alertHistoryComplete
+          && alertEventCount !== null
+          && alerts.length === alertEventCount,
+      }
     }
 
     if (event.kind === 'ai.prediction') {
+      const label = eventText(event, 'prediction')
+      const knownLabel = label === 'benign' || label === 'syn_flood' || label === 'udp_flood'
       next = {
         ...next,
         detection: mapDetection(event, browserAt, this.current.run?.revision),
-        alerts: addAlert(this.current.alerts, event, browserAt),
+        predictionCount: predictionId !== null && !duplicatePrediction
+          && this.current.predictionCount !== null
+          ? this.current.predictionCount + 1
+          : this.current.predictionCount,
+        predictionClassCounts: knownLabel
+          && predictionId !== null
+          && !duplicatePrediction
+          && this.current.predictionClassCounts !== null
+          ? {
+            ...this.current.predictionClassCounts,
+            [label]: this.current.predictionClassCounts[label] + 1,
+          }
+          : this.current.predictionClassCounts,
       }
     } else if (event.kind === 'policy.decision') {
       const policy = mapPolicy(event, browserAt)
@@ -555,6 +767,29 @@ export class B8DashboardReducer {
               verifiedSources: verifiedSourceCount(rules, complete),
             },
           }
+          const counterPoint = updated.evidence?.reference === event.event_id
+            ? mapCounterEvent(event, updated)
+            : null
+          if (counterPoint) {
+            const dropCounterHistory = [
+              ...next.network.dropCounterHistory,
+              counterPoint,
+            ].slice(-MAX_DROP_COUNTER_POINTS)
+            const dropCounterSampleCount = next.network.dropCounterSampleCount === null
+              ? null
+              : next.network.dropCounterSampleCount + 1
+            next = {
+              ...next,
+              network: {
+                ...next.network,
+                dropCounterHistory,
+                dropCounterSampleCount,
+                dropCounterHistoryComplete: next.network.dropCounterHistoryComplete
+                  && dropCounterSampleCount !== null
+                  && dropCounterSampleCount === dropCounterHistory.length,
+              },
+            }
+          }
         }
       }
     }
@@ -564,6 +799,10 @@ export class B8DashboardReducer {
     if (this.seenEventIds.size > MAX_SEEN_EVENT_IDS) {
       const oldest = this.seenEventIds.values().next().value
       if (typeof oldest === 'string') this.seenEventIds.delete(oldest)
+    }
+    if (this.seenPredictionIds.size > MAX_SEEN_EVENT_IDS) {
+      const oldest = this.seenPredictionIds.values().next().value
+      if (typeof oldest === 'string') this.seenPredictionIds.delete(oldest)
     }
     return next
   }

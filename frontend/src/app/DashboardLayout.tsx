@@ -333,9 +333,9 @@ export function DashboardLayout() {
             />
             <MetricCard
               icon={Bell}
-              label="Cảnh báo đang hoạt động"
-              value={formatMetric(snapshot.network.activeAlerts)}
-              note="Theo trạng thái từ hệ thống"
+              label="Sự kiện cảnh báo / mitigation"
+              value={formatMetric(snapshot.alertEventCount)}
+              note="Sự kiện trong run; không phải số alert còn active"
               accent="amber"
             />
             <MetricCard
@@ -347,7 +347,12 @@ export function DashboardLayout() {
             />
           </div>
           <div className="dashboard-grid analysis-grid">
-            <NetworkOverview traffic={snapshot.network.traffic} />
+            <NetworkOverview
+              traffic={snapshot.network.traffic}
+              dropCounters={snapshot.network.dropCounterHistory}
+              dropCounterSampleCount={snapshot.network.dropCounterSampleCount}
+              dropCounterHistoryComplete={snapshot.network.dropCounterHistoryComplete}
+            />
             <AIDetection
               detection={snapshot.detection}
               policy={snapshot.detection?.sampleId

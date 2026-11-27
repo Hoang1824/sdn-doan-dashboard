@@ -197,8 +197,182 @@ test('snapshot maps B8 metadata and leaves unavailable traffic/latency metrics n
   assert.deepEqual(snapshot.performance, {
     detectionMs: null,
     mitigationMs: null,
+    mitigationSampleCount: null,
     roundTripMs: null,
   })
+})
+
+test('snapshot maps complete class aggregates, alert history and per-cookie counter samples', () => {
+  const baseState = wireSnapshot().state as Record<string, unknown>
+  const attack = event(
+    'attack-history-1',
+    'ai.prediction',
+    { id: 'sample-attack', prediction: 'syn_flood', src_ip: '10.0.0.10' },
+    'sample-attack',
+  )
+  const confirmation = event(
+    'mitigation-confirmed-1',
+    'mitigation.confirmed',
+    { src_ip: '10.0.0.10', dpid: 3, mitigation_action: 'DROP' },
+    'sample-attack',
+    '0xb8',
+  )
+  const drop = event(
+    'drop-observed-1',
+    'mitigation.counter',
+    {
+      src_ip: '10.0.0.10',
+      dpid: 3,
+      mitigation_action: 'DROP',
+      counter_source: 'verified_flow_stats',
+      packet_count: 142,
+    },
+    'sample-attack',
+    '0xb8',
+  )
+  const wire = parseSnapshot(wireSnapshot({
+    state: {
+      ...baseState,
+      prediction_class_counts: { benign: 5920, syn_flood: 5, udp_flood: 2 },
+      alert_event_count: 3,
+      alert_events: [attack, confirmation, drop],
+      recent_events: [
+        event(
+          'history-policy-1',
+          'policy.decision',
+          { src_ip: '10.0.0.10', decision: 'mitigate' },
+          'sample-attack',
+        ),
+      ],
+      drop_counter_sample_count: 1,
+      drop_counter_history: [{
+        event_id: 'drop-observed-1',
+        timestamp: 1795701900,
+        cookie: '0xb8',
+        dpid: 3,
+        src_ip: '10.0.0.10',
+        sample_id: 'sample-attack',
+        packet_count: 142,
+        delta: null,
+        counter_reset: false,
+      }],
+      mitigation_observation_ms: 25,
+      mitigation_observation_count: 1,
+    },
+  }))
+  const snapshot = mapSnapshot(wire, browserAt)
+
+  assert.deepEqual(snapshot.predictionClassCounts, {
+    benign: 5920,
+    syn_flood: 5,
+    udp_flood: 2,
+  })
+  assert.equal(snapshot.alertEventCount, 3)
+  assert.equal(snapshot.alertHistoryComplete, true)
+  assert.deepEqual(snapshot.alerts.map((item) => item.category), [
+    'attack_prediction',
+    'mitigation_confirmed',
+    'drop_observed',
+  ])
+  assert.ok(snapshot.alerts.every((item) => item.scope === 'historical'))
+  assert.equal(snapshot.alerts[0].sourceIp, '10.0.0.10')
+  assert.equal(snapshot.alerts[2].sampleId, 'sample-attack')
+  assert.equal(snapshot.alerts[2].cookie, '0xb8')
+  assert.equal(snapshot.history[0].sourceIp, '10.0.0.10')
+  assert.deepEqual(snapshot.network.dropCounterHistory, [{
+    id: 'drop-observed-1',
+    timestamp: new Date(1795701900 * 1000).toISOString(),
+    cookie: '0xb8',
+    dpid: 3,
+    sourceIp: '10.0.0.10',
+    sampleId: 'sample-attack',
+    packetCount: 142,
+    delta: null,
+    counterReset: false,
+  }])
+  assert.equal(snapshot.network.dropCounterSampleCount, 1)
+  assert.equal(snapshot.network.dropCounterHistoryComplete, true)
+  assert.equal(snapshot.performance.mitigationMs, 25)
+  assert.equal(snapshot.performance.mitigationSampleCount, 1)
+  assert.equal(snapshot.network.throughputMbps, null)
+  assert.equal(snapshot.network.packetsPerSecond, null)
+  assert.equal(snapshot.performance.detectionMs, null)
+  assert.equal(snapshot.performance.roundTripMs, null)
+})
+
+test('LIVE reducer updates class counts and per-cookie counters once and marks new alerts LIVE', () => {
+  const baseState = wireSnapshot().state as Record<string, unknown>
+  const wire = parseSnapshot(wireSnapshot({
+    data_mode: 'LIVE',
+    run: {
+      ...(wireSnapshot().run as Record<string, unknown>),
+      status: 'running',
+    },
+    state: {
+      ...baseState,
+      prediction_class_counts: { benign: 10, syn_flood: 2, udp_flood: 1 },
+      alert_event_count: 0,
+      alert_events: [],
+      recent_events: [],
+      drop_counter_sample_count: 0,
+      drop_counter_history: [],
+      mitigation_observation_ms: null,
+      mitigation_observation_count: 0,
+    },
+  }))
+  const reducer = new B8DashboardReducer(mapSnapshot(wire, browserAt))
+  const prediction = event(
+    'live-syn-prediction',
+    'ai.prediction',
+    { id: 'live-syn-sample', prediction: 'syn_flood', src_ip: '10.0.0.10' },
+    'live-syn-sample',
+  )
+
+  reducer.apply(prediction, browserAt)
+  reducer.apply({ ...prediction, event_id: 'same-sample-new-event-id' }, browserAt)
+  assert.equal(reducer.currentSnapshot().predictionCount, 5928)
+  assert.deepEqual(reducer.currentSnapshot().predictionClassCounts, {
+    benign: 10,
+    syn_flood: 3,
+    udp_flood: 1,
+  })
+
+  const common = {
+    src_ip: '10.0.0.10',
+    dst_ip: '10.0.0.100',
+    ip_proto: 6,
+    dpid: 3,
+    mitigation_action: 'DROP',
+  }
+  reducer.apply({
+    ...event('live-request', 'mitigation.requested', common, 'live-syn-sample', '0xb8'),
+    source_timestamp: 1795701900,
+  }, browserAt)
+  reducer.apply({
+    ...event('live-counter-142', 'mitigation.counter', {
+      ...common,
+      packet_count: 142,
+      counter_source: 'verified_flow_stats',
+    }, 'live-syn-sample', '0xb8'),
+    source_timestamp: 1795701900.1,
+  }, browserAt)
+  reducer.apply({
+    ...event('live-counter-200', 'mitigation.counter', {
+      ...common,
+      packet_count: 200,
+      counter_source: 'verified_flow_stats',
+    }, 'live-syn-sample', '0xb8'),
+    source_timestamp: 1795701900.2,
+  }, browserAt)
+
+  const current = reducer.currentSnapshot()
+  assert.deepEqual(current.network.dropCounterHistory.map((point) => point.packetCount), [142, 200])
+  assert.deepEqual(current.network.dropCounterHistory.map((point) => point.delta), [null, 58])
+  assert.equal(current.network.dropCounterSampleCount, 2)
+  assert.equal(current.alertEventCount, 3)
+  assert.ok(current.alerts.every((item) => item.scope === 'live'))
+  assert.equal(current.alerts.filter((item) => item.category === 'drop_observed').length, 1)
+  assert.equal(current.alerts.find((item) => item.category === 'drop_observed')?.cookie, '0xb8')
 })
 
 test('idempotent reducer joins policy by sample_id and keeps cumulative counters as latest values', () => {

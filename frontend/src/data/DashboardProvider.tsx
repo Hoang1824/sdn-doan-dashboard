@@ -171,12 +171,23 @@ export function DashboardProvider({ children }: DashboardProviderProps) {
             commitSnapshot({
               ...snapshotRef.current,
               runLiveStatus: status,
+              alerts: status.terminal
+                ? snapshotRef.current.alerts.map((alert) => ({ ...alert, scope: 'historical' }))
+                : snapshotRef.current.alerts,
               receivedAt: new Date().toISOString(),
             })
           },
-          onRunComplete: (_status, finalizationStatus) => {
+          onRunComplete: (status, finalizationStatus) => {
             if (!active) return
             runFinalizationRef.current = finalizationStatus
+            const current = snapshotRef.current
+            commitSnapshot({
+              ...current,
+              runLiveStatus: current.runLiveStatus
+                ? { ...current.runLiveStatus, status, terminal: true, eligible: false }
+                : current.runLiveStatus,
+              alerts: current.alerts.map((alert) => ({ ...alert, scope: 'historical' })),
+            })
             setRequestedDataMode('REPLAY')
           },
           onStatus: (status, detail) => {

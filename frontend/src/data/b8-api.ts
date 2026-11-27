@@ -62,6 +62,24 @@ export interface B8RuleProjection {
   readonly last_event_id: string | null
 }
 
+export interface B8DropCounterProjection {
+  readonly event_id: string
+  readonly timestamp: number
+  readonly cookie: string
+  readonly dpid: number
+  readonly src_ip: string | null
+  readonly sample_id: string | null
+  readonly packet_count: number
+  readonly delta: number | null
+  readonly counter_reset: boolean
+}
+
+export interface B8PredictionClassCounts {
+  readonly benign: number
+  readonly syn_flood: number
+  readonly udp_flood: number
+}
+
 export interface B8SnapshotResponse {
   readonly run_id: string
   readonly data_mode: DashboardDataMode
@@ -83,6 +101,14 @@ export interface B8SnapshotResponse {
     rules: readonly B8RuleProjection[]
     verified_source_count: number
     observations: readonly B8NormalizedEvent[]
+    prediction_class_counts: B8PredictionClassCounts | null
+    alert_event_count: number | null
+    alert_events: readonly B8NormalizedEvent[] | null
+    recent_events: readonly B8NormalizedEvent[] | null
+    drop_counter_sample_count: number | null
+    drop_counter_history: readonly B8DropCounterProjection[] | null
+    mitigation_observation_ms: number | null
+    mitigation_observation_count: number | null
   }>
 }
 
@@ -367,6 +393,53 @@ function parseRule(value: unknown): B8RuleProjection {
   }
 }
 
+function nonnegativeSafeInteger(value: unknown, label: string): number {
+  if (!Number.isSafeInteger(value) || typeof value !== 'number' || value < 0) {
+    throw new B8ApiError(`Invalid ${label} response field.`)
+  }
+  return value
+}
+
+function parsePredictionClassCounts(value: unknown): B8PredictionClassCounts | null {
+  if (value === undefined || value === null) return null
+  const counts = requireRecord(value, 'prediction_class_counts')
+  return {
+    benign: nonnegativeSafeInteger(counts.benign, 'prediction_class_counts benign'),
+    syn_flood: nonnegativeSafeInteger(counts.syn_flood, 'prediction_class_counts syn_flood'),
+    udp_flood: nonnegativeSafeInteger(counts.udp_flood, 'prediction_class_counts udp_flood'),
+  }
+}
+
+function parseOptionalEvents(value: unknown, label: string): readonly B8NormalizedEvent[] | null {
+  if (value === undefined || value === null) return null
+  if (!Array.isArray(value)) throw new B8ApiError(`Invalid ${label} response field.`)
+  return value.map(parseEvent)
+}
+
+function parseDropCounterHistory(value: unknown): readonly B8DropCounterProjection[] | null {
+  if (value === undefined || value === null) return null
+  if (!Array.isArray(value)) throw new B8ApiError('Invalid drop_counter_history response field.')
+  return value.map((item) => {
+    const sample = requireRecord(item, 'drop counter history item')
+    const delta = finiteNumber(sample.delta, 'drop counter delta', true)
+    if (delta !== null) nonnegativeSafeInteger(delta, 'drop counter delta')
+    if (typeof sample.counter_reset !== 'boolean') {
+      throw new B8ApiError('Invalid drop counter reset flag.')
+    }
+    return {
+      event_id: requireString(sample.event_id, 'drop counter event_id'),
+      timestamp: requiredFiniteNumber(sample.timestamp, 'drop counter timestamp'),
+      cookie: requireString(sample.cookie, 'drop counter cookie'),
+      dpid: nonnegativeSafeInteger(sample.dpid, 'drop counter dpid'),
+      src_ip: nullableString(sample.src_ip, 'drop counter src_ip'),
+      sample_id: nullableString(sample.sample_id, 'drop counter sample_id'),
+      packet_count: nonnegativeSafeInteger(sample.packet_count, 'drop counter packet_count'),
+      delta,
+      counter_reset: sample.counter_reset,
+    }
+  })
+}
+
 export function parseSnapshot(value: unknown): B8SnapshotResponse {
   const snapshot = requireRecord(value, 'snapshot')
   const run = requireRecord(snapshot.run, 'snapshot run')
@@ -384,6 +457,24 @@ export function parseSnapshot(value: unknown): B8SnapshotResponse {
   if (!Array.isArray(policies) || !Array.isArray(rules) || !Array.isArray(observations)) {
     throw new B8ApiError('Invalid snapshot state collections.')
   }
+  const alertEventCount = state.alert_event_count === undefined || state.alert_event_count === null
+    ? null
+    : nonnegativeSafeInteger(state.alert_event_count, 'alert_event_count')
+  const dropCounterSampleCount = state.drop_counter_sample_count === undefined
+    || state.drop_counter_sample_count === null
+    ? null
+    : nonnegativeSafeInteger(state.drop_counter_sample_count, 'drop_counter_sample_count')
+  const mitigationObservationMs = state.mitigation_observation_ms === undefined
+    || state.mitigation_observation_ms === null
+    ? null
+    : requiredFiniteNumber(state.mitigation_observation_ms, 'mitigation_observation_ms')
+  if (mitigationObservationMs !== null && mitigationObservationMs < 0) {
+    throw new B8ApiError('Invalid mitigation_observation_ms response field.')
+  }
+  const mitigationObservationCount = state.mitigation_observation_count === undefined
+    || state.mitigation_observation_count === null
+    ? null
+    : nonnegativeSafeInteger(state.mitigation_observation_count, 'mitigation_observation_count')
 
   const seed = run.seed
   if (seed !== null && typeof seed !== 'string' && typeof seed !== 'number') {
@@ -411,6 +502,14 @@ export function parseSnapshot(value: unknown): B8SnapshotResponse {
       rules: rules.map(parseRule),
       verified_source_count: requiredFiniteNumber(state.verified_source_count, 'verified_source_count'),
       observations: observations.map(parseEvent),
+      prediction_class_counts: parsePredictionClassCounts(state.prediction_class_counts),
+      alert_event_count: alertEventCount,
+      alert_events: parseOptionalEvents(state.alert_events, 'alert_events'),
+      recent_events: parseOptionalEvents(state.recent_events, 'recent_events'),
+      drop_counter_sample_count: dropCounterSampleCount,
+      drop_counter_history: parseDropCounterHistory(state.drop_counter_history),
+      mitigation_observation_ms: mitigationObservationMs,
+      mitigation_observation_count: mitigationObservationCount,
     },
   }
 }

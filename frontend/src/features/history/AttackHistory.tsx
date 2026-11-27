@@ -59,9 +59,9 @@ export function AttackHistory({
   return (
     <Panel id="history" title="Attack History" kicker="NHẬT KÝ SỰ KIỆN"
       subtitle={dataMode === 'REPLAY'
-        ? 'Tóm lược snapshot, không phải toàn bộ event: latest prediction, tối đa 100 policies + 100 observations; read model giữ tối đa 500.'
+        ? 'Tối đa 500 sự kiện Ryu/pha gần nhất từ snapshot; không phải kho lưu trữ toàn bộ event.'
         : dataMode === 'LIVE'
-          ? 'Tối đa 500 event gần nhất; đây không phải kho lưu trữ toàn bộ lịch sử.'
+          ? 'Tối đa 500 sự kiện Ryu/pha gần nhất; timeline trùng lặp không được cộng vào prediction/counter.'
           : 'Chưa tải snapshot lịch sử hoặc luồng LIVE.'}
       className="history-panel"
       action={<span className="text-muted">UTC+07:00</span>}>

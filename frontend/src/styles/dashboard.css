@@ -147,6 +147,18 @@
 .chart-bottom { gap: 18px; }
 .chart-bottom > span { display: flex; align-items: center; gap: 5px; }
 .chart-bottom small { margin-left: auto; font-size: 9px; }
+.drop-counter-section { border-top: 1px solid var(--border-soft); padding: 14px 20px 18px; }
+.drop-counter-heading { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
+.drop-counter-heading h3, .alert-group h3 { margin: 0; color: #c4d2e3; font-size: 11px; font-weight: 600; }
+.drop-counter-heading p, .drop-counter-heading small { color: var(--dim); font-size: 9px; margin: 5px 0 0; }
+.drop-counter-heading > small { flex: 0 0 auto; text-align: right; }
+.drop-counter-chart { height: 190px; min-width: 0; margin-top: 8px; }
+.drop-counter-chart-empty { display: grid; place-items: center; border: 1px dashed var(--border-soft); border-radius: 6px; }
+.drop-counter-chart-empty .empty-state { padding: 12px; }
+.drop-counter-latest { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 6px 12px; margin-top: 8px; }
+.drop-counter-latest li { display: grid; gap: 3px; min-width: 0; padding: 8px 10px; border: 1px solid var(--border-soft); border-radius: 5px; color: var(--muted); font-size: 9px; }
+.drop-counter-latest .mono { overflow-wrap: anywhere; color: #c4d2e3; }
+.drop-counter-latest small { color: var(--dim); }
 .detection-body { padding: 0 22px 18px; text-align: center; flex: 1; }
 .confidence-dial { position: relative; width: 126px; height: 126px; margin: -3px auto 8px; }
 .confidence-dial svg { width: 100%; height: 100%; transform: rotate(-90deg); fill: none; stroke-width: 5; }
@@ -163,6 +175,7 @@
 .detail-list dd { margin: 0; color: #b5c2d4; text-align: right; overflow-wrap: anywhere; }
 .alerts-panel { margin-bottom: 22px; }
 .alerts-panel .panel-header { padding-bottom: 12px; }
+.alert-group > h3 { padding: 10px 22px 6px; }
 .text-link { display: inline-flex; align-items: center; gap: 5px; color: #a5b6cb; font-size: 10px; }
 .text-link:hover { color: var(--cyan); }
 .alert-empty { display: flex; gap: 17px; align-items: center; padding: 3px 22px 21px; }
@@ -175,6 +188,7 @@
 .alert-list p { color: var(--muted); font-size: 11px; }
 .alert-list small { color: var(--dim); font-size: 10px; }
 .alert-badges { margin-left: auto; display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+.alert-observability-note { font-size: 9px; }
 .section-divider { display: flex; align-items: center; gap: 13px; margin: 25px 0 16px; }
 .section-divider span { color: var(--dim); font-size: 8px; letter-spacing: 1.5px; }
 .section-divider > div { flex: 1; height: 1px; background: var(--border-soft); }

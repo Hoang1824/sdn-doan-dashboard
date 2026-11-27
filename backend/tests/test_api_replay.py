@@ -148,6 +148,189 @@ def test_s8_fixture_counter_and_lifecycle_are_idempotent() -> None:
     )
 
 
+def test_snapshot_aggregates_all_prediction_classes_alerts_and_drop_counters(
+    tmp_path: Path,
+) -> None:
+    run_id = "observability-run"
+    run_dir = tmp_path / run_id
+    run_dir.mkdir()
+    (run_dir / "manifest.json").write_text(
+        json.dumps({"run_id": run_id, "status": "complete", "mode": "MITIGATE"}),
+        encoding="utf-8",
+    )
+    common = {
+        "run_id": run_id,
+        "sample_id": "sample-syn",
+        "src_ip": "10.0.0.10",
+        "dst_ip": "10.0.0.100",
+        "ip_proto": 6,
+        "cookie": "0xb8test",
+        "dpid": 3,
+        "mitigation_action": "DROP",
+    }
+    records = [
+        {
+            "event": "v2_prediction",
+            "run_id": run_id,
+            "id": "sample-benign",
+            "timestamp": 100.0,
+            "prediction": "benign",
+            "src_ip": "10.0.0.1",
+        },
+        {
+            "event": "v2_prediction",
+            "run_id": run_id,
+            "id": "sample-syn",
+            "timestamp": 101.0,
+            "prediction": "syn_flood",
+            "src_ip": "10.0.0.10",
+        },
+        {
+            "event": "v2_prediction",
+            "run_id": run_id,
+            "id": "sample-udp",
+            "timestamp": 102.0,
+            "prediction": "udp_flood",
+            "src_ip": "10.0.0.11",
+        },
+        {
+            "event": "v2_prediction",
+            "run_id": run_id,
+            "id": "sample-syn",
+            "timestamp": 103.0,
+            "prediction": "syn_flood",
+            "src_ip": "10.0.0.10",
+        },
+        {
+            **common,
+            "event": "b8_mitigation_requested",
+            "timestamp": 200.0,
+        },
+        {
+            **common,
+            "event": "b8_mitigation_confirmed",
+            "timestamp": 200.1,
+        },
+        {
+            **common,
+            "event": "b8_drop_counter",
+            "timestamp": 200.25,
+            "packet_count": 142,
+            "counter_source": "verified_flow_stats",
+        },
+        {
+            **common,
+            "event": "b8_drop_counter",
+            "timestamp": 200.5,
+            "packet_count": 200,
+            "counter_source": "verified_flow_stats",
+        },
+        {
+            **common,
+            "event": "b8_mitigation_flow_removed",
+            "timestamp": 210.0,
+            "reason": 0,
+            "packet_count": 12795,
+            "byte_count": 1000000,
+        },
+        {
+            **common,
+            "event": "b8_mitigation_cleaned",
+            "timestamp": 210.1,
+        },
+    ]
+    (run_dir / "ryu_events.jsonl").write_text(
+        "".join(json.dumps(record) + "\n" for record in records),
+        encoding="utf-8",
+    )
+
+    with TestClient(create_app(tmp_path)) as client:
+        response = client.get(f"/api/runs/{run_id}/snapshot")
+
+    assert response.status_code == 200
+    state = response.json()["state"]
+    assert state["prediction_count"] == 3
+    assert state["prediction_class_counts"] == {
+        "benign": 1,
+        "syn_flood": 1,
+        "udp_flood": 1,
+    }
+    assert state["alert_event_count"] == 5
+    assert [event["kind"] for event in state["alert_events"]] == [
+        "ai.prediction",
+        "ai.prediction",
+        "mitigation.requested",
+        "mitigation.confirmed",
+        "mitigation.counter",
+    ]
+    assert all(event["payload"].get("src_ip") for event in state["alert_events"])
+    assert state["drop_counter_sample_count"] == 2
+    assert [item["packet_count"] for item in state["drop_counter_history"]] == [142, 200]
+    assert [item["delta"] for item in state["drop_counter_history"]] == [None, 58]
+    assert state["drop_counter_history"][-1]["cookie"] == "0xb8test"
+    assert state["mitigation_observation_ms"] == 250
+    assert state["mitigation_observation_count"] == 1
+    rule = state["rules"][0]
+    assert rule["status"] == "CLEANED"
+    assert rule["packet_count"] == 12795
+    assert any(event["payload"].get("src_ip") == "10.0.0.10" for event in state["recent_events"])
+
+
+def test_snapshot_keeps_full_aggregate_counts_with_bounded_event_histories(
+    tmp_path: Path,
+) -> None:
+    run_id = "bounded-observability-run"
+    run_dir = tmp_path / run_id
+    run_dir.mkdir()
+    (run_dir / "manifest.json").write_text(
+        json.dumps({"run_id": run_id, "status": "complete"}),
+        encoding="utf-8",
+    )
+    records = [
+        {
+            "event": "v2_prediction",
+            "run_id": run_id,
+            "id": f"sample-{index}",
+            "timestamp": 1000.0 + index,
+            "prediction": "syn_flood",
+            "src_ip": "10.0.0.10",
+        }
+        for index in range(101)
+    ]
+    records.extend(
+        {
+            "event": "b8_drop_counter",
+            "run_id": run_id,
+            "timestamp": 2000.0 + index,
+            "cookie": "0xb8bounded",
+            "dpid": 3,
+            "src_ip": "10.0.0.10",
+            "mitigation_action": "DROP",
+            "counter_source": "verified_flow_stats",
+            "packet_count": index,
+        }
+        for index in range(505)
+    )
+    (run_dir / "ryu_events.jsonl").write_text(
+        "".join(json.dumps(record) + "\n" for record in records),
+        encoding="utf-8",
+    )
+
+    with TestClient(create_app(tmp_path)) as client:
+        response = client.get(f"/api/runs/{run_id}/snapshot")
+
+    assert response.status_code == 200
+    state = response.json()["state"]
+    assert state["prediction_count"] == 101
+    assert state["prediction_class_counts"]["syn_flood"] == 101
+    assert state["alert_event_count"] == 102
+    assert len(state["alert_events"]) == 100
+    assert state["drop_counter_sample_count"] == 505
+    assert len(state["drop_counter_history"]) == 500
+    assert len(state["recent_events"]) == 500
+    assert state["drop_counter_history"][-1]["packet_count"] == 504
+
+
 def test_snapshot_retains_all_cleaned_rules_and_final_flow_removed_counters(
     tmp_path: Path,
 ) -> None:

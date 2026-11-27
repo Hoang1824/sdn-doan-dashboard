@@ -211,7 +211,11 @@ Returns the reduced read-only state and a consistent per-stream
 - run ID, manifest metadata, revision, `data_mode`, explicit `policy_mode`.
   `run.seed` uses `manifest.seed` when non-null, otherwise
   `manifest.seed_reference`;
-- latest prediction and unique prediction count;
+- latest prediction and unique `prediction_count`;
+- `prediction_class_counts` for unique prediction IDs labeled `benign`,
+  `syn_flood`, or `udp_flood`. Counts are computed from the full primary
+  stream, not `latest_prediction` or a bounded history list. They are not
+  accuracy, precision, or recall;
 - latest policy decisions;
 - mitigation rules keyed by DPID/cookie, lifecycle, evidence, latest
   cumulative packet/byte counts and valid deltas;
@@ -219,6 +223,31 @@ Returns the reduced read-only state and a consistent per-stream
   rules whose **current** status is `VERIFIED` or `DROPPING`. This is not a
   cumulative count of sources ever verified; `REMOVED`, `REMOVED_IDLE`, and
   `CLEANED` rules are excluded even when their verification evidence remains;
+- `alert_event_count` plus the latest 100 `alert_events`: unique attack
+  predictions, DROP requests, controller confirmations, and one first
+  positive DROP-evidence event per DPID/cookie. A valid
+  `verified_flow_stats` counter is preferred; a positive FlowRemoved final
+  counter is retained when no positive counter sample was seen. This is an
+  event total, not a count of unresolved/active attacks. The bounded list
+  carries normalized fields including `src_ip`, `sample_id`, cookie, and source
+  timestamp when present;
+- up to 500 `recent_events` from the primary Ryu stream and phase-state
+  records. Timeline prediction/rule/counter representations are excluded from
+  this history projection to avoid presenting duplicate primary events;
+- `drop_counter_sample_count` and the latest 500 `drop_counter_history`
+  samples. Only `b8_drop_counter` records with
+  `counter_source="verified_flow_stats"`, valid timestamp, cookie, DPID and
+  nonnegative integer count for `mitigation_action="DROP"` are included. Each
+  sample preserves its per-cookie cumulative `packet_count`; `delta` is
+  calculated against the preceding valid sample for that same DPID/cookie,
+  and is null for the first sample or a counter reset. Samples from different
+  cookies are never summed;
+- `mitigation_observation_ms` and `mitigation_observation_count`: median and
+  sample count, by DPID/cookie, of elapsed source time from the first valid
+  `b8_mitigation_requested` timestamp to the first later valid
+  `verified_flow_stats` counter timestamp for a DROP rule. This is the time to
+  the first observed counter sample (and includes the polling interval), not
+  FlowMod installation latency. It is null when timestamps cannot be paired;
 - phase observations and last source/backend receive times;
 - source availability. Unsupported traffic/performance values remain null.
 
@@ -231,6 +260,15 @@ The response includes `live_monitor` (`status`, `terminal`, `freshness`,
 `eligible`, `last_activity_at`, `last_activity_stream`, `age_seconds`, and
 `freshness_seconds`). It describes manifest and log-file activity only; it is
 not an AI, Sensor, Ryu, OVS, or traffic health check.
+
+The frontend marks events received from the current nonterminal WebSocket
+session as LIVE and snapshot events as historical. At terminal status it moves
+all displayed alerts to history before loading the final REPLAY snapshot.
+Neither B8 alert events nor run status provide an alert-open/alert-close
+lifecycle; therefore the dashboard does not calculate an unresolved active
+alert count. Network Mbps/PPS, model accuracy, detection latency and RTT stay
+unavailable unless their source schema and measurement basis are added and
+verified. Confidence is not an accuracy metric.
 
 ### `GET /api/runs/{run_id}/events?after=<cursor>&limit=100&data_mode=REPLAY`
 

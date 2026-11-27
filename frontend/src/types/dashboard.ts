@@ -53,6 +53,24 @@ export interface TrafficPoint {
   readonly egressMbps: number
 }
 
+export interface DropCounterPoint {
+  readonly id: string
+  readonly timestamp: string
+  readonly cookie: string
+  readonly dpid: number
+  readonly sourceIp: string | null
+  readonly sampleId: string | null
+  readonly packetCount: number
+  readonly delta: number | null
+  readonly counterReset: boolean
+}
+
+export interface PredictionClassCounts {
+  readonly benign: number
+  readonly syn_flood: number
+  readonly udp_flood: number
+}
+
 export interface EventTimes {
   /** Source/B8 timestamp, normalized for display without inferring latency. */
   readonly sourceTimestamp: string | null
@@ -77,7 +95,16 @@ export interface AlertEvent {
   readonly sourceIp: string | null
   readonly description: string
   readonly severity: 'critical' | 'high' | 'medium' | null
-  readonly confirmed: boolean
+  readonly category:
+    | 'attack_prediction'
+    | 'mitigation_requested'
+    | 'mitigation_confirmed'
+    | 'drop_observed'
+  readonly scope: 'live' | 'historical'
+  readonly sampleId: string | null
+  readonly cookie: string | null
+  readonly dpid: number | string | null
+  readonly packetCount: number | null
   readonly times: EventTimes
 }
 
@@ -153,6 +180,9 @@ export interface DashboardSnapshot {
   /** Browser receipt time of the last snapshot/event, never page load. */
   readonly receivedAt: string | null
   readonly predictionCount: number | null
+  readonly predictionClassCounts: PredictionClassCounts | null
+  readonly alertEventCount: number | null
+  readonly alertHistoryComplete: boolean
   readonly policies: PolicyDecision[]
   readonly mitigationsComplete: boolean
   readonly network: {
@@ -161,6 +191,9 @@ export interface DashboardSnapshot {
     readonly activeAlerts: number | null
     readonly verifiedSources: number | null
     readonly traffic: TrafficPoint[]
+    readonly dropCounterHistory: DropCounterPoint[]
+    readonly dropCounterSampleCount: number | null
+    readonly dropCounterHistoryComplete: boolean
   }
   readonly detection: Detection | null
   readonly alerts: AlertEvent[]
@@ -169,6 +202,7 @@ export interface DashboardSnapshot {
   readonly performance: {
     readonly detectionMs: number | null
     readonly mitigationMs: number | null
+    readonly mitigationSampleCount: number | null
     readonly roundTripMs: number | null
   }
   readonly services: {

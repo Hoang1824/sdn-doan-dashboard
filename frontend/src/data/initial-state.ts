@@ -10,6 +10,9 @@ export function createInitialSnapshot(): DashboardSnapshot {
     backendSnapshotReceivedAt: null,
     receivedAt: null,
     predictionCount: null,
+    predictionClassCounts: null,
+    alertEventCount: null,
+    alertHistoryComplete: false,
     policies: [],
     mitigationsComplete: true,
     network: {
@@ -18,6 +21,9 @@ export function createInitialSnapshot(): DashboardSnapshot {
       activeAlerts: null,
       verifiedSources: null,
       traffic: [],
+      dropCounterHistory: [],
+      dropCounterSampleCount: null,
+      dropCounterHistoryComplete: false,
     },
     detection: null,
     alerts: [],
@@ -26,6 +32,7 @@ export function createInitialSnapshot(): DashboardSnapshot {
     performance: {
       detectionMs: null,
       mitigationMs: null,
+      mitigationSampleCount: null,
       roundTripMs: null,
     },
     services: {
