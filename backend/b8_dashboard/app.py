@@ -21,6 +21,8 @@ from .reader import (
 )
 from .service import B8DashboardService
 
+FINALIZATION_TIMEOUT_SECONDS = 5.0
+
 
 def _is_loopback(host: str) -> bool:
     if host.lower() == "localhost":
@@ -46,6 +48,7 @@ def create_app(
     host: str | None = None,
     poll_interval: float = 0.25,
     heartbeat_interval: float = 10.0,
+    finalization_timeout: float = FINALIZATION_TIMEOUT_SECONDS,
 ) -> FastAPI:
     configured_host = host or os.environ.get("B8_DASHBOARD_HOST", "127.0.0.1")
     if configured_host in {"0.0.0.0", "::", "[::]"}:
@@ -69,6 +72,7 @@ def create_app(
     app.state.dashboard_host = configured_host
     app.state.poll_interval = max(0.1, poll_interval)
     app.state.heartbeat_interval = max(1.0, heartbeat_interval)
+    app.state.finalization_timeout = max(0.0, finalization_timeout)
 
     app.add_middleware(
         CORSMiddleware,
@@ -175,7 +179,7 @@ def create_app(
             return
 
         try:
-            service._data_mode(run_id, data_mode)
+            service._data_mode(run_id, data_mode, allow_inactive=True)
             service.reader.run_dir(run_id)
             await websocket.accept(subprotocol="b8.dashboard.v1" if expected else None)
         except (
@@ -200,14 +204,100 @@ def create_app(
 
         cursor = after
         last_heartbeat = time.monotonic()
+        last_run_status: tuple[str | None, str, str | None] | None = None
+        terminal_started_at: float | None = None
+        finished_phase_confirmed = False
+        finished_phase_statuses: set[str] = set()
         try:
             while True:
                 page = await asyncio.to_thread(
-                    service.events, run_id, cursor, 100, data_mode
+                    service.events,
+                    run_id,
+                    cursor,
+                    100,
+                    data_mode,
+                    live_session=data_mode == "LIVE",
                 )
                 for event in page.events:
                     await websocket.send_json({"type": "event", "event": event})
+                    marker_status = service.finished_phase_status(event)
+                    if marker_status is not None:
+                        finished_phase_statuses.add(marker_status)
                 cursor = page.next_cursor
+
+                if data_mode == "LIVE":
+                    run_status = await asyncio.to_thread(
+                        service.run_live_status, run_id
+                    )
+                    if run_status["terminal"]:
+                        expected_status = (
+                            run_status["status"].strip().lower()
+                            if isinstance(run_status["status"], str)
+                            else None
+                        )
+                        if expected_status in finished_phase_statuses:
+                            finished_phase_confirmed = True
+
+                        if terminal_started_at is None:
+                            terminal_started_at = time.monotonic()
+                            if not finished_phase_confirmed:
+                                finished_offset = await asyncio.to_thread(
+                                    service.finished_phase_offset, run_id
+                                )
+                                if finished_offset is not None:
+                                    finished_phase_confirmed = (
+                                        await asyncio.to_thread(
+                                            service.reader.cursor_includes_record,
+                                            run_id,
+                                            cursor,
+                                            "events.jsonl",
+                                            finished_offset,
+                                        )
+                                    )
+
+                        finalization_timed_out = (
+                            time.monotonic() - terminal_started_at
+                            >= app.state.finalization_timeout
+                        )
+                        if not page.has_more and (
+                            finished_phase_confirmed or finalization_timed_out
+                        ):
+                            await websocket.send_json(
+                                {
+                                    "type": "run_complete",
+                                    "status": run_status["status"],
+                                    "cursor": cursor,
+                                    "last_activity_at": run_status["last_activity_at"],
+                                    "finalization_status": (
+                                        "confirmed"
+                                        if finished_phase_confirmed
+                                        else "timeout"
+                                    ),
+                                }
+                            )
+                            await websocket.close(code=1000, reason="Run completed.")
+                            return
+
+                    status_signature = (
+                        run_status["status"],
+                        run_status["freshness"],
+                        run_status["last_activity_at"],
+                    )
+                    if status_signature != last_run_status:
+                        await websocket.send_json(
+                            {
+                                "type": "run_status",
+                                "status": run_status["status"],
+                                "terminal": run_status["terminal"],
+                                "freshness": run_status["freshness"],
+                                "eligible": run_status["eligible"],
+                                "last_activity_at": run_status["last_activity_at"],
+                                "last_activity_stream": run_status["last_activity_stream"],
+                                "age_seconds": run_status["age_seconds"],
+                                "freshness_seconds": run_status["freshness_seconds"],
+                            }
+                        )
+                        last_run_status = status_signature
 
                 if data_mode == "REPLAY" and not page.has_more:
                     await websocket.send_json(

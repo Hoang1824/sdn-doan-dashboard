@@ -13,7 +13,6 @@ export function Panel({ id, title, kicker, subtitle, action, className = '', chi
     {children}
   </section>
 }
-
 export function StatusBadge({ tone = 'muted', children }: {
   tone?: 'muted' | 'cyan' | 'amber' | 'red' | 'green'; children: ReactNode
 }) {
@@ -37,9 +36,4 @@ export function MetricCard({ icon: Icon, label, value, unit, note, accent = 'cya
     <div className="metric-value"><strong>{value}</strong>{unit && <span>{unit}</span>}</div>
     <div className="metric-note"><span className="tiny-dash" aria-hidden="true" />{note}</div>
   </article>
-}
-
-export function formatTimestamp(value: string | null) {
-  if (!value || !Number.isFinite(Date.parse(value))) return '—'
-  return new Intl.DateTimeFormat('vi-VN', { dateStyle: 'short', timeStyle: 'medium', timeZone: 'Asia/Ho_Chi_Minh' }).format(new Date(value))
 }

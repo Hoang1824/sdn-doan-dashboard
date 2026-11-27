@@ -35,13 +35,15 @@ allowed browser origins have been reviewed. A non-loopback bind requires
 subprotocol in addition to the `b8.dashboard.v1` protocol. Never put tokens in
 URLs or commit them.
 
-Live tailing is disabled unless `B8_ACTIVE_RUN_ID` is set to the explicitly
-selected active run. Historical runs are read as `REPLAY`; manifest status
-alone never turns a replay into live data. The reader only consumes
-newline-terminated JSONL records. A partial trailing line is held for the next
-poll. Set `B8_ACTIVE_RUN_ID` only while intentionally following that run. The
-WebSocket requires the REST snapshot cursor to avoid an implicit replay/live
-boundary.
+When `B8_ACTIVE_RUN_ID` is unset, `GET /api/runs` discovers LIVE candidates
+without restarting FastAPI. A candidate must have a matching manifest `run_id`,
+manifest `status="running"`, and a complete-line JSONL file updated within 30
+seconds. Multiple candidates
+are reported as ambiguous; the dashboard requires an explicit choice. Set
+`B8_ACTIVE_RUN_ID` to pin one run manually; a stale or completed pin does not
+fall back to another run. Historical runs remain `REPLAY`. The reader only
+consumes newline-terminated JSONL records; a partial trailing line is held for
+the next poll.
 
 ## API
 
@@ -51,10 +53,20 @@ boundary.
 - `GET /api/runs/{run_id}/events?after=<cursor>&limit=100&data_mode=REPLAY`
 - `WS /ws/runs/{run_id}?after=<cursor>&data_mode=REPLAY|LIVE`
 
-Call the snapshot endpoint first and pass its `as_of_cursor` to the WebSocket.
-For LIVE mode, the run ID must equal `B8_ACTIVE_RUN_ID`. The WebSocket replays
-records after the cursor before following appends. A stale/replaced-file cursor
-requires a new snapshot.
+The frontend refreshes the run catalog every five seconds. Call the snapshot
+endpoint first and pass its `as_of_cursor` to the WebSocket. Without a manual
+pin, LIVE is allowed for an explicitly selected, fresh running candidate; with
+a pin, the run ID must match `B8_ACTIVE_RUN_ID`. The WebSocket replays records
+after the cursor before following appends and reports log freshness separately
+from socket connectivity. A terminal manifest produces `run_complete` after
+complete lines are drained and `events.jsonl` confirms a phase-state record
+with `traffic_mode="finished"` and a status matching the terminal manifest
+(case-insensitively). The `phase` field is not used as the finalization marker.
+The wait is capped at five seconds; an absent or mismatched marker produces
+`finalization_status="timeout"` rather than a hung socket. The frontend then
+loads a final REPLAY snapshot and warns on timeout. A stale/replaced-file
+cursor requires a new snapshot. Neither JSONL freshness nor WebSocket
+connectivity is a health check for AI or Ryu.
 
 ## Tests
 

@@ -1,4 +1,4 @@
 import { createContext } from 'react'
-import type { DashboardSnapshot } from '../types/dashboard'
+import type { DashboardContextValue } from '../types/dashboard'
 
-export const DashboardContext = createContext<DashboardSnapshot | null>(null)
+export const DashboardContext = createContext<DashboardContextValue | null>(null)

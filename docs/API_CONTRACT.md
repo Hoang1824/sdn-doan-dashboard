@@ -1,6 +1,6 @@
 # B8 Dashboard API Contract
 
-**Status:** Implemented for read-only replay; live tailing is available only for an explicitly configured active run.
+**Status:** Implemented for read-only replay and read-only LIVE run discovery/tailing.
 
 **Source basis:** `docs/API_CONTRACT_B8_DASHBOARD_DRAFT.md` and `docs/B8_DASHBOARD_HANDOFF_20261127.md`.
 **Scope:** Read `logs_v2/<run_id>/` only. This service does not call or control the model, Sensor, relay, Ryu, Mininet, or OVS.
@@ -155,10 +155,11 @@ observations of this state, not additional packets.
 
 ## 5. Data mode versus policy mode
 
-- `data_mode`: `LIVE` or `REPLAY`. `LIVE` is permitted only for the run ID
-  explicitly configured as active by the backend operator. A manifest status
-  alone is insufficient. A live subscription follows appended records; the
-  separate freshness state indicates whether new records are arriving.
+- `data_mode`: `LIVE` or `REPLAY`. `LIVE` is permitted for a fresh running
+  candidate explicitly selected by the operator, or for the configured
+  `B8_ACTIVE_RUN_ID` pin. A manifest status alone is insufficient. A live
+  subscription follows appended records; the separate freshness state
+  indicates whether new records are arriving.
 - `policy_mode`: `ALERT_ONLY`, `MITIGATE`, or `null` if unknown. It is read only
   from explicit B8 policy metadata/event fields. Do not derive it from
   `DDOS_AI_MODE`, `auto_mitigation_allowed`, or UI defaults.
@@ -179,7 +180,28 @@ does not assert that AI, Sensor, Ryu or OVS is healthy.
 ### `GET /api/runs`
 
 Lists safe run directories and available manifest metadata. Invalid/missing
-manifests are reported as unavailable metadata; they are not fabricated.
+manifests are reported as unavailable metadata; they are not fabricated. Each
+run may include `live`, containing manifest status, JSONL freshness, last
+complete-line activity, and eligibility. The top-level `live_discovery` is:
+
+```json
+{
+  "mode": "automatic",
+  "status": "single",
+  "selected_run_id": "run-id",
+  "candidate_run_ids": ["run-id"],
+  "freshness_seconds": 30
+}
+```
+
+`status` is `none`, `single`, or `ambiguous` in automatic mode, and
+`manual_active` or `manual_unavailable` when `B8_ACTIVE_RUN_ID` pins a run.
+Automatic candidates must have manifest `status="running"` and at least one
+newline-terminated JSONL stream updated within the 30-second freshness window.
+The manifest `run_id` must match its validated directory name.
+The backend reports multiple candidates without selecting one. A configured
+manual pin never falls back to another run. Discovery rereads the log root for
+each request; it does not require restarting FastAPI when a run is created.
 
 ### `GET /api/runs/{run_id}/snapshot?data_mode=REPLAY|LIVE`
 
@@ -201,7 +223,14 @@ Returns the reduced read-only state and a consistent per-stream
 - source availability. Unsupported traffic/performance values remain null.
 
 `data_mode` defaults to `REPLAY`. `LIVE` returns conflict unless the requested
-run matches the operator-configured active run.
+run is running and has fresh complete-line JSONL activity. When
+`B8_ACTIVE_RUN_ID` is set, the requested run must also match that manual pin.
+Without a pin, the API permits an explicitly selected eligible run; the UI
+requires the operator to choose when discovery is ambiguous.
+The response includes `live_monitor` (`status`, `terminal`, `freshness`,
+`eligible`, `last_activity_at`, `last_activity_stream`, `age_seconds`, and
+`freshness_seconds`). It describes manifest and log-file activity only; it is
+not an AI, Sensor, Ryu, OVS, or traffic health check.
 
 ### `GET /api/runs/{run_id}/events?after=<cursor>&limit=100&data_mode=REPLAY`
 
@@ -232,15 +261,36 @@ cursor. `after` is required; a connection without the snapshot cursor receives
 ```json
 {"type":"event","event":{ "...": "normalized event envelope" }}
 {"type":"heartbeat","cursor":"...","data_mode":"LIVE"}
+{"type":"run_status","status":"running","terminal":false,"freshness":"fresh","eligible":true,"last_activity_at":"...","last_activity_stream":"ryu_events.jsonl","age_seconds":0.2,"freshness_seconds":30}
+{"type":"run_complete","status":"completed","cursor":"...","last_activity_at":"...","finalization_status":"confirmed"}
 {"type":"resync_required","reason":"cursor_invalid"}
 {"type":"replay_complete","cursor":"..."}
 ```
 
 The server replays all complete records after the cursor before following new
-appends in LIVE mode. REPLAY ends with `replay_complete`. Reconnect uses the
-last cursor successfully applied by the client. A gap/file replacement causes
+appends in LIVE mode. LIVE sends `run_status` when manifest status or log
+freshness changes. On a terminal manifest, the server drains complete lines
+across all JSONL streams and waits for a valid `run.phase` record from
+`events.jsonl` with `traffic_mode="finished"` and a `status` matching the
+terminal manifest status (case-insensitively). The `phase` field is not used
+as the finalization marker. The server only reports
+`finalization_status="confirmed"` after the matching finished record is
+covered by the delivered cursor and no complete lines remain. If no matching
+marker is available, it waits at most five seconds, then reports
+`finalization_status="timeout"` after draining currently available complete
+lines. This bounded fallback also covers aborted runs whose final phase record
+is missing or does not match the manifest. The frontend fetches a final REPLAY
+snapshot in either case; it warns when finalization timed out. A confirmed
+final snapshot therefore includes the matching finished record and the final
+reduced state. REPLAY ends with `replay_complete`. Reconnect uses the last
+cursor successfully applied by the client. A gap/file replacement causes
 resync rather than silent event loss. Slow clients receive bounded pages; the
 backend does not hold file locks while sending network data.
+
+The browser refreshes `GET /api/runs` every five seconds. This discovers newly
+created runs without a backend restart. Automatic selection is not performed
+when more than one candidate is present. WebSocket connectivity and heartbeat
+are transport state only; they do not indicate AI or Ryu health.
 
 ## 8. Security and read-only guarantee
 

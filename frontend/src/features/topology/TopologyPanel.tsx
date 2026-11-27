@@ -12,7 +12,7 @@ import '@xyflow/react/dist/style.css'
 import './topology.css'
 
 interface TopologyPanelProps {
-  /** Populated by a future adapter; omitted means no snapshot has been received. */
+  /** Omitted inputs display the documented static B8 reference topology. */
   nodes?: Node[]
   edges?: Edge[]
 }
@@ -20,14 +20,41 @@ interface TopologyPanelProps {
 const emptyNodes: Node[] = []
 const emptyEdges: Edge[] = []
 
+const b8ReferenceNodes: Node[] = [
+  { id: 'h1', position: { x: 0, y: 0 }, data: { kind: 'host', label: 'h1 · 10.0.0.1' } },
+  { id: 'h2', position: { x: 0, y: 70 }, data: { kind: 'host', label: 'h2 · 10.0.0.2' } },
+  { id: 'h3', position: { x: 0, y: 140 }, data: { kind: 'host', label: 'h3 · 10.0.0.3' } },
+  { id: 'h4', position: { x: 0, y: 210 }, data: { kind: 'host', label: 'h4 · 10.0.0.4' } },
+  { id: 's1', position: { x: 190, y: 105 }, data: { kind: 'switch', label: 's1' } },
+  { id: 'a1', position: { x: 390, y: 35 }, data: { kind: 'host', label: 'a1 · 10.0.0.10' } },
+  { id: 'a2', position: { x: 390, y: 105 }, data: { kind: 'host', label: 'a2 · 10.0.0.11' } },
+  { id: 'a3', position: { x: 390, y: 175 }, data: { kind: 'host', label: 'a3 · 10.0.0.12' } },
+  { id: 's2', position: { x: 580, y: 105 }, data: { kind: 'switch', label: 's2' } },
+  { id: 'hsrv', position: { x: 780, y: 105 }, data: { kind: 'host', label: 'hsrv · 10.0.0.100' } },
+  { id: 'score', position: { x: 980, y: 105 }, data: { kind: 'switch', label: 'score · DPID 3' } },
+]
+
+const b8ReferenceEdges: Edge[] = [
+  { id: 'h1-s1', source: 'h1', target: 's1' },
+  { id: 'h2-s1', source: 'h2', target: 's1' },
+  { id: 'h3-s1', source: 'h3', target: 's1' },
+  { id: 'h4-s1', source: 'h4', target: 's1' },
+  { id: 'a1-s2', source: 'a1', target: 's2' },
+  { id: 'a2-s2', source: 'a2', target: 's2' },
+  { id: 'a3-s2', source: 'a3', target: 's2' },
+  { id: 'hsrv-score', source: 'hsrv', target: 'score' },
+]
+
 export function TopologyPanel({ nodes, edges }: TopologyPanelProps) {
   const [expanded, setExpanded] = useState(false)
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null)
   const headingId = useId()
   const canvasId = useId()
-  const topologyNodes = nodes ?? emptyNodes
+  const referenceMode = nodes === undefined && edges === undefined
+  const topologyNodes = nodes ?? (referenceMode ? b8ReferenceNodes : emptyNodes)
+  const topologyEdges = edges ?? (referenceMode ? b8ReferenceEdges : emptyEdges)
   const selectedNode = topologyNodes.find((node) => node.id === selectedNodeId)
-  const hasKnownKinds = nodes !== undefined && nodes.every((node) =>
+  const hasKnownKinds = topologyNodes.every((node) =>
     node.data.kind === 'host' || node.data.kind === 'switch',
   )
   const hosts = hasKnownKinds ? topologyNodes.filter((node) => node.data.kind === 'host').length : '—'
@@ -43,7 +70,7 @@ export function TopologyPanel({ nodes, edges }: TopologyPanelProps) {
         <div>
           <p className="topology-kicker">HẠ TẦNG MẠNG</p>
           <h2 id={headingId}>SDN Topology</h2>
-          <p className="panel-subtitle">Cấu trúc và kết nối trong mạng SDN</p>
+          <p className="panel-subtitle">{referenceMode ? 'Topology tham chiếu tĩnh B8 · không phải discovery live Ryu' : 'Cấu trúc và kết nối trong mạng SDN'}</p>
         </div>
         <button
           type="button"
@@ -61,13 +88,13 @@ export function TopologyPanel({ nodes, edges }: TopologyPanelProps) {
       <div className="topology-legend" aria-label="Thống kê thiết bị mạng">
         <span><Monitor size={13} aria-hidden="true" /> Hosts <strong>{hosts}</strong></span>
         <span><Router size={13} aria-hidden="true" /> Switches <strong>{switches}</strong></span>
-        <span><Link2 size={13} aria-hidden="true" /> Links <strong>{edges === undefined ? '—' : edges.length}</strong></span>
+        <span><Link2 size={13} aria-hidden="true" /> Links <strong>{topologyEdges.length}</strong></span>
       </div>
 
       <div id={canvasId} className="topology-canvas">
         <ReactFlow
           nodes={topologyNodes}
-          edges={edges ?? emptyEdges}
+          edges={topologyEdges}
           colorMode="dark"
           nodesDraggable={false}
           nodesConnectable={false}
@@ -98,7 +125,7 @@ export function TopologyPanel({ nodes, edges }: TopologyPanelProps) {
           <div className="topology-empty">
             <div className="topology-empty-icon"><Network size={27} strokeWidth={1.4} aria-hidden="true" /></div>
             <h3>{nodes === undefined ? 'Chưa có dữ liệu topology' : 'Chưa có thiết bị trong topology'}</h3>
-            <p>Sơ đồ sẽ hiển thị khi nhận được thông tin từ Ryu.</p>
+            <p>Sơ đồ sẽ hiển thị khi nhận được thông tin từ nguồn topology đã cấu hình.</p>
           </div>
         )}
 
@@ -119,7 +146,7 @@ export function TopologyPanel({ nodes, edges }: TopologyPanelProps) {
       </div>
 
       <div className="topology-footer">
-        <span><span className="topology-source-dot" />Nguồn: Ryu Controller</span>
+        <span><span className="topology-source-dot" />{referenceMode ? 'Tham chiếu tĩnh theo handoff B8 · không phải topology live Ryu' : 'Topology từ nguồn dữ liệu được truyền vào'}</span>
         <span>Kéo để di chuyển · Cuộn để thu phóng</span>
       </div>
     </section>

@@ -13,12 +13,11 @@ export function formatMetric(value: number | null, decimals = 0): string {
 }
 
 /**
- * Defense in depth for presentation, not controller/switch verification.
- * The future adapter must validate the actual evidence against its API contract.
+ * Defense in depth for display; the B8 adapter validates controller/switch evidence.
  * A claimed VERIFIED value without usable evidence must never appear verified.
  */
 export function getMitigationStatus(rule: MitigationRule): DisplayMitigationStatus {
-  if (rule.status !== 'verified') return rule.status
+  if (rule.status !== 'verified' && rule.status !== 'dropping') return rule.status
 
   const evidence = rule.evidence
   if (
@@ -36,17 +35,20 @@ export function getMitigationStatus(rule: MitigationRule): DisplayMitigationStat
 }
 
 /**
- * Only expose a reported aggregate when the available rule evidence supports it.
+ * Only expose a reported aggregate when complete current rule evidence supports it.
  * An unavailable or inconsistent count stays unknown, including partial snapshots.
- * Pagination needs a separately validated aggregate-evidence contract in the adapter.
  */
 export function getVerifiedSourceCount(snapshot: DashboardSnapshot): number | null {
+  if (!snapshot.mitigationsComplete) return null
   const reported = snapshot.network.verifiedSources
   if (reported === null || !Number.isSafeInteger(reported) || reported < 0) return null
 
   const supportedSources = new Set(
     snapshot.mitigations
-      .filter((rule) => getMitigationStatus(rule) === 'verified')
+      .filter((rule) => {
+        const status = getMitigationStatus(rule)
+        return status === 'verified' || status === 'dropping'
+      })
       .map((rule) => rule.sourceIp.trim())
       .filter((sourceIp) => sourceIp.length > 0),
   )

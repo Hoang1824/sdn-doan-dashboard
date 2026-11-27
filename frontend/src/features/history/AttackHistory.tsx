@@ -1,7 +1,7 @@
 import { Fragment, useId, useMemo, useState } from 'react'
 import { ChevronDown, ChevronLeft, ChevronRight, History, Search } from 'lucide-react'
 import { EmptyState, Panel, StatusBadge } from '../../components/ui'
-import type { HistoryEvent } from '../../types/dashboard'
+import type { DashboardDataMode, HistoryEvent } from '../../types/dashboard'
 
 const pageSize = 6
 const kindLabels: Record<HistoryEvent['kind'], string> = {
@@ -26,7 +26,13 @@ function formatTime(value: string) {
   }).format(date)
 }
 
-export function AttackHistory({ events }: { events: readonly HistoryEvent[] }) {
+export function AttackHistory({
+  events,
+  dataMode,
+}: {
+  events: readonly HistoryEvent[]
+  dataMode: DashboardDataMode | null
+}) {
   const [query, setQuery] = useState('')
   const [kind, setKind] = useState('all')
   const [page, setPage] = useState(1)
@@ -52,7 +58,11 @@ export function AttackHistory({ events }: { events: readonly HistoryEvent[] }) {
 
   return (
     <Panel id="history" title="Attack History" kicker="NHẬT KÝ SỰ KIỆN"
-      subtitle="Theo dõi các sự kiện phát hiện, giảm thiểu và vận hành."
+      subtitle={dataMode === 'REPLAY'
+        ? 'Tóm lược snapshot, không phải toàn bộ event: latest prediction, tối đa 100 policies + 100 observations; read model giữ tối đa 500.'
+        : dataMode === 'LIVE'
+          ? 'Tối đa 500 event gần nhất; đây không phải kho lưu trữ toàn bộ lịch sử.'
+          : 'Chưa tải snapshot lịch sử hoặc luồng LIVE.'}
       className="history-panel"
       action={<span className="text-muted">UTC+07:00</span>}>
       <div className="table-toolbar">
@@ -101,7 +111,9 @@ export function AttackHistory({ events }: { events: readonly HistoryEvent[] }) {
                 {expanded && <tr className="detail-row" id={detailId}><td colSpan={5}>
                   <dl className="event-details">
                     <div><dt>Mã sự kiện</dt><dd className="mono">{event.id}</dd></div>
-                    <div><dt>Thời gian nguồn</dt><dd className="mono">{event.timestamp}</dd></div>
+                    <div><dt>Thời điểm B8</dt><dd className="mono">{event.times.sourceTimestamp ?? '—'}</dd></div>
+                    <div><dt>Backend nhận</dt><dd className="mono">{event.times.backendReceivedAt ?? '—'}</dd></div>
+                    <div><dt>Browser nhận</dt><dd className="mono">{event.times.browserReceivedAt ?? '—'}</dd></div>
                     <div><dt>Nội dung</dt><dd>{event.description}</dd></div>
                   </dl>
                 </td></tr>}

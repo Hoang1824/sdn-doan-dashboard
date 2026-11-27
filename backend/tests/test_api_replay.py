@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
+import time
 from urllib.parse import urlencode
 
 from fastapi.testclient import TestClient
@@ -24,6 +26,64 @@ def _client(active_run_id: str | None = None) -> TestClient:
             allowed_origins=["http://localhost:5173"],
         )
     )
+
+
+def _write_live_run(
+    log_root: Path,
+    run_id: str,
+    *,
+    status: str = "running",
+    activity_age: float = 0,
+) -> Path:
+    run_dir = log_root / run_id
+    run_dir.mkdir(parents=True)
+    (run_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "run_id": run_id,
+                "scenario": "S1",
+                "seed": 701,
+                "mode": "MITIGATE",
+                "status": status,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (run_dir / "ryu_events.jsonl").write_text(
+        json.dumps(
+            {
+                "event": "v2_prediction",
+                "run_id": run_id,
+                "id": f"{run_id}-prediction",
+                "timestamp": 1795701900.0,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    old_time = time.time() - activity_age
+    os.utime(run_dir / "ryu_events.jsonl", (old_time, old_time))
+    return run_dir
+
+
+def _append_finished_phase(run_dir: Path, status: str) -> None:
+    with (run_dir / "events.jsonl").open("a", encoding="utf-8") as file:
+        file.write(
+            json.dumps(
+                {
+                    "schema_version": "fixture-1",
+                    "run_id": run_dir.name,
+                    "phase_seq": 99,
+                    "changed_at": "2026-11-28T00:00:00Z",
+                    "phase": "fixture-phase",
+                    "traffic_mode": "finished",
+                    "status": status,
+                    "experiment_mode": "MITIGATE",
+                }
+            )
+            + "\n"
+        )
+        file.flush()
 
 
 def test_s1_fixture_is_replay_and_keeps_run_metadata() -> None:
@@ -175,7 +235,15 @@ def test_snapshot_accepts_phase_state_records_without_event_and_deduplicates_mar
     run_dir = tmp_path / run_id
     run_dir.mkdir()
     (run_dir / "manifest.json").write_text(
-        json.dumps({"scenario": "S1", "seed": 701, "mode": "MITIGATE"}),
+        json.dumps(
+            {
+                "run_id": run_id,
+                "scenario": "S1",
+                "seed": 701,
+                "mode": "MITIGATE",
+                "status": "running",
+            }
+        ),
         encoding="utf-8",
     )
     (run_dir / "timeline.jsonl").write_text(
@@ -435,15 +503,366 @@ def test_invalid_run_and_cursor_return_explicit_errors() -> None:
     assert page.json()["detail"]["resync_required"] is True
 
 
-def test_read_only_live_mode_requires_explicit_active_run_id() -> None:
-    with _client(active_run_id=S8_RUN) as client:
-        response = client.get(
-            f"/api/runs/{S8_RUN}/snapshot",
+def test_live_mode_supports_manual_pin_and_auto_discovery(tmp_path: Path) -> None:
+    run_id = "live-run"
+    _write_live_run(tmp_path, run_id)
+    with TestClient(create_app(tmp_path)) as auto_client:
+        auto_response = auto_client.get(
+            f"/api/runs/{run_id}/snapshot",
+            params={"data_mode": "LIVE"},
+        )
+    with TestClient(create_app(tmp_path, active_run_id=run_id)) as manual_client:
+        manual_response = manual_client.get(
+            f"/api/runs/{run_id}/snapshot",
             params={"data_mode": "LIVE"},
         )
 
+    assert auto_response.status_code == 200
+    assert auto_response.json()["data_mode"] == "LIVE"
+    assert manual_response.status_code == 200
+    assert manual_response.json()["data_mode"] == "LIVE"
+
+
+def test_live_mode_rejects_run_without_fresh_activity(tmp_path: Path) -> None:
+    run_id = "stale-run"
+    _write_live_run(tmp_path, run_id, activity_age=31)
+    with TestClient(create_app(tmp_path, active_run_id=run_id)) as client:
+        response = client.get(
+            f"/api/runs/{run_id}/snapshot",
+            params={"data_mode": "LIVE"},
+        )
+
+    assert response.status_code == 409
+
+
+def test_auto_discovery_finds_run_created_after_backend_start(tmp_path: Path) -> None:
+    with TestClient(create_app(tmp_path)) as client:
+        before = client.get("/api/runs").json()
+        assert before["live_discovery"]["status"] == "none"
+
+        _write_live_run(tmp_path, "new-live-run")
+        response = client.get("/api/runs")
+
     assert response.status_code == 200
-    assert response.json()["data_mode"] == "LIVE"
+    body = response.json()
+    assert body["live_discovery"] == {
+        "mode": "automatic",
+        "status": "single",
+        "selected_run_id": "new-live-run",
+        "candidate_run_ids": ["new-live-run"],
+        "freshness_seconds": 30,
+    }
+    assert body["runs"][0]["live"]["eligible"] is True
+    assert body["runs"][0]["live"]["freshness"] == "fresh"
+
+
+def test_discovery_excludes_stale_completed_and_aborted_runs(tmp_path: Path) -> None:
+    _write_live_run(tmp_path, "fresh-run")
+    _write_live_run(tmp_path, "stale-run", activity_age=31)
+    _write_live_run(tmp_path, "aborted-run", status="aborted")
+    _write_live_run(tmp_path, "complete-run", status="completed")
+    invalid_run_dir = _write_live_run(tmp_path, "manifest-mismatch-run")
+    (invalid_run_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "run_id": "another-run",
+                "scenario": "S1",
+                "seed": 701,
+                "mode": "MITIGATE",
+                "status": "running",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with TestClient(create_app(tmp_path)) as client:
+        body = client.get("/api/runs").json()
+
+    assert body["live_discovery"]["candidate_run_ids"] == ["fresh-run"]
+    runs = {run["run_id"]: run["live"] for run in body["runs"]}
+    assert runs["stale-run"]["eligible"] is False
+    assert runs["stale-run"]["freshness"] == "stale"
+    assert runs["aborted-run"]["eligible"] is False
+    assert runs["aborted-run"]["terminal"] is True
+    assert runs["complete-run"]["eligible"] is False
+    assert runs["manifest-mismatch-run"]["eligible"] is False
+
+
+def test_multiple_fresh_runs_are_reported_without_selecting_one(tmp_path: Path) -> None:
+    _write_live_run(tmp_path, "live-run-a")
+    _write_live_run(tmp_path, "live-run-b")
+
+    with TestClient(create_app(tmp_path)) as client:
+        body = client.get("/api/runs").json()
+
+    assert body["live_discovery"]["status"] == "ambiguous"
+    assert body["live_discovery"]["selected_run_id"] is None
+    assert body["live_discovery"]["candidate_run_ids"] == ["live-run-a", "live-run-b"]
+
+
+def test_manual_run_pin_does_not_fall_back_to_another_candidate(tmp_path: Path) -> None:
+    _write_live_run(tmp_path, "pinned-stale-run", activity_age=31)
+    _write_live_run(tmp_path, "other-fresh-run")
+
+    with TestClient(create_app(tmp_path, active_run_id="pinned-stale-run")) as client:
+        body = client.get("/api/runs").json()
+        live_snapshot = client.get(
+            "/api/runs/other-fresh-run/snapshot",
+            params={"data_mode": "LIVE"},
+        )
+
+    assert body["live_discovery"]["mode"] == "manual"
+    assert body["live_discovery"]["status"] == "manual_unavailable"
+    assert body["live_discovery"]["candidate_run_ids"] == []
+    assert live_snapshot.status_code == 409
+
+
+def test_live_websocket_reports_completion_after_flushed_final_events(
+    tmp_path: Path,
+) -> None:
+    run_id = "live-completing-run"
+    run_dir = _write_live_run(tmp_path, run_id)
+    source = run_dir / "ryu_events.jsonl"
+    app = create_app(
+        tmp_path,
+        active_run_id=run_id,
+        poll_interval=0.1,
+        heartbeat_interval=1.0,
+        finalization_timeout=1.0,
+    )
+
+    with TestClient(app) as client:
+        snapshot = client.get(
+            f"/api/runs/{run_id}/snapshot",
+            params={"data_mode": "LIVE"},
+        ).json()
+        query = urlencode(
+            {"after": snapshot["as_of_cursor"], "data_mode": "LIVE"}
+        )
+        with client.websocket_connect(f"/ws/runs/{run_id}?{query}") as websocket:
+            with source.open("a", encoding="utf-8") as file:
+                for index in range(105):
+                    file.write(
+                        json.dumps(
+                            {
+                                "event": "v2_prediction",
+                                "run_id": run_id,
+                                "id": f"final-prediction-{index}",
+                                "timestamp": 1795701901.0 + index,
+                            }
+                        )
+                        + "\n"
+                    )
+                file.flush()
+            (run_dir / "manifest.json").write_text(
+                json.dumps({"run_id": run_id, "status": "complete"}),
+                encoding="utf-8",
+            )
+            frames = []
+            while True:
+                frame = websocket.receive_json()
+                frames.append(frame)
+                if frame["type"] == "run_status" and frame["status"] == "complete":
+                    break
+
+            assert not any(frame["type"] == "run_complete" for frame in frames)
+            _append_finished_phase(run_dir, "complete")
+
+            while True:
+                frame = websocket.receive_json()
+                frames.append(frame)
+                if frame["type"] == "run_complete":
+                    break
+
+    final_events = [frame for frame in frames if frame["type"] == "event"]
+    assert len(final_events) == 106
+    assert final_events[104]["event"]["keys"]["sample_id"] == "final-prediction-104"
+    assert final_events[-1]["event"]["kind"] == "run.phase"
+    assert final_events[-1]["event"]["payload"]["traffic_mode"] == "finished"
+    assert frames[-1]["type"] == "run_complete"
+    assert frames[-1]["status"] == "complete"
+    assert frames[-1]["finalization_status"] == "confirmed"
+
+    with TestClient(create_app(tmp_path, active_run_id=run_id)) as client:
+        final_snapshot = client.get(
+            f"/api/runs/{run_id}/snapshot",
+            params={"data_mode": "REPLAY"},
+        ).json()
+        reconnect_query = urlencode(
+            {"after": frames[-1]["cursor"], "data_mode": "LIVE"}
+        )
+        with client.websocket_connect(
+            f"/ws/runs/{run_id}?{reconnect_query}"
+        ) as websocket:
+            reconnect_frame = websocket.receive_json()
+
+    assert final_snapshot["state"]["prediction_count"] == 106
+    assert any(
+        event["kind"] == "run.phase"
+        and event["payload"]["traffic_mode"] == "finished"
+        for event in final_snapshot["state"]["observations"]
+    )
+    assert reconnect_frame["type"] == "run_complete"
+    assert reconnect_frame["finalization_status"] == "confirmed"
+
+
+def test_live_websocket_waits_for_finished_phase_after_terminal_manifest(
+    tmp_path: Path,
+) -> None:
+    run_id = "live-reconnect-finalizing-run"
+    run_dir = _write_live_run(tmp_path, run_id)
+    app = create_app(
+        tmp_path,
+        active_run_id=run_id,
+        poll_interval=0.05,
+        finalization_timeout=1.0,
+    )
+
+    with TestClient(app) as client:
+        snapshot = client.get(
+            f"/api/runs/{run_id}/snapshot",
+            params={"data_mode": "LIVE"},
+        ).json()
+        cursor = snapshot["as_of_cursor"]
+        (run_dir / "manifest.json").write_text(
+            json.dumps({"run_id": run_id, "status": "completed"}),
+            encoding="utf-8",
+        )
+
+        with client.websocket_connect(
+            f"/ws/runs/{run_id}?{urlencode({'after': cursor, 'data_mode': 'LIVE'})}"
+        ) as first_socket:
+            while True:
+                frame = first_socket.receive_json()
+                if frame["type"] == "run_status" and frame["status"] == "completed":
+                    break
+            assert frame["terminal"] is True
+            _append_finished_phase(run_dir, "completed")
+
+        with client.websocket_connect(
+            f"/ws/runs/{run_id}?{urlencode({'after': cursor, 'data_mode': 'LIVE'})}"
+        ) as reconnected_socket:
+            frames = []
+            while True:
+                frame = reconnected_socket.receive_json()
+                frames.append(frame)
+                if frame["type"] == "run_complete":
+                    break
+
+    phase_events = [
+        frame for frame in frames
+        if frame["type"] == "event" and frame["event"]["kind"] == "run.phase"
+    ]
+    assert len(phase_events) == 1
+    assert phase_events[0]["event"]["payload"]["traffic_mode"] == "finished"
+    assert frames[-1]["type"] == "run_complete"
+    assert frames[-1]["finalization_status"] == "confirmed"
+
+
+def test_finished_marker_status_must_match_terminal_manifest(
+    tmp_path: Path,
+) -> None:
+    run_id = "live-finished-status-mismatch"
+    run_dir = _write_live_run(tmp_path, run_id)
+    app = create_app(
+        tmp_path,
+        active_run_id=run_id,
+        poll_interval=0.02,
+        finalization_timeout=0.12,
+    )
+
+    with TestClient(app) as client:
+        snapshot = client.get(
+            f"/api/runs/{run_id}/snapshot",
+            params={"data_mode": "LIVE"},
+        ).json()
+        (run_dir / "manifest.json").write_text(
+            json.dumps({"run_id": run_id, "status": "complete"}),
+            encoding="utf-8",
+        )
+        _append_finished_phase(run_dir, "aborted")
+        query = urlencode(
+            {"after": snapshot["as_of_cursor"], "data_mode": "LIVE"}
+        )
+        with client.websocket_connect(f"/ws/runs/{run_id}?{query}") as websocket:
+            while True:
+                frame = websocket.receive_json()
+                if frame["type"] == "run_complete":
+                    break
+
+    assert frame["status"] == "complete"
+    assert frame["finalization_status"] == "timeout"
+
+
+def test_terminal_runs_present_before_backend_start_reconnect_without_duplicates(
+    tmp_path: Path,
+) -> None:
+    terminal_runs = (
+        ("already-complete", "complete"),
+        ("already-aborted", "aborted"),
+    )
+    for run_id, status in terminal_runs:
+        run_dir = _write_live_run(tmp_path, run_id, status=status)
+        _append_finished_phase(run_dir, status)
+
+    with TestClient(create_app(tmp_path, poll_interval=0.02)) as client:
+        for run_id, status in terminal_runs:
+            snapshot = client.get(
+                f"/api/runs/{run_id}/snapshot",
+                params={"data_mode": "REPLAY"},
+            ).json()
+            query = urlencode(
+                {"after": snapshot["as_of_cursor"], "data_mode": "LIVE"}
+            )
+            with client.websocket_connect(
+                f"/ws/runs/{run_id}?{query}"
+            ) as websocket:
+                frames = []
+                while True:
+                    frame = websocket.receive_json()
+                    frames.append(frame)
+                    if frame["type"] == "run_complete":
+                        break
+
+            assert frames[-1]["status"] == status
+            assert frames[-1]["finalization_status"] == "confirmed"
+            assert not any(frame["type"] == "event" for frame in frames)
+
+
+def test_aborted_run_without_finished_phase_completes_after_finite_wait(
+    tmp_path: Path,
+) -> None:
+    run_id = "live-aborted-without-finished"
+    run_dir = _write_live_run(tmp_path, run_id)
+    app = create_app(
+        tmp_path,
+        active_run_id=run_id,
+        poll_interval=0.02,
+        finalization_timeout=0.15,
+    )
+
+    with TestClient(app) as client:
+        snapshot = client.get(
+            f"/api/runs/{run_id}/snapshot",
+            params={"data_mode": "LIVE"},
+        ).json()
+        query = urlencode(
+            {"after": snapshot["as_of_cursor"], "data_mode": "LIVE"}
+        )
+        started = time.monotonic()
+        with client.websocket_connect(f"/ws/runs/{run_id}?{query}") as websocket:
+            (run_dir / "manifest.json").write_text(
+                json.dumps({"run_id": run_id, "status": "aborted"}),
+                encoding="utf-8",
+            )
+            while True:
+                frame = websocket.receive_json()
+                if frame["type"] == "run_complete":
+                    break
+
+    assert frame["status"] == "aborted"
+    assert frame["finalization_status"] == "timeout"
+    assert time.monotonic() - started < 1.0
 
 
 def test_live_websocket_reads_appended_complete_jsonl_lines(tmp_path: Path) -> None:
@@ -451,7 +870,15 @@ def test_live_websocket_reads_appended_complete_jsonl_lines(tmp_path: Path) -> N
     run_dir = tmp_path / run_id
     run_dir.mkdir()
     (run_dir / "manifest.json").write_text(
-        json.dumps({"scenario": "S1", "seed": 701, "mode": "MITIGATE"}),
+        json.dumps(
+            {
+                "run_id": run_id,
+                "scenario": "S1",
+                "seed": 701,
+                "mode": "MITIGATE",
+                "status": "running",
+            }
+        ),
         encoding="utf-8",
     )
     source = run_dir / "ryu_events.jsonl"

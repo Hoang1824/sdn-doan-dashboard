@@ -5,6 +5,7 @@ import json
 import os
 import re
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -180,6 +181,72 @@ class JsonlRunReader:
                 runs.append({"run_id": path.name, "manifest": manifest})
         return runs
 
+    def latest_complete_activity(self, run_id: str) -> dict[str, Any]:
+        directory = self.run_dir(run_id)
+        latest_mtime: float | None = None
+        latest_stream: str | None = None
+        for stream in STREAMS:
+            path = _safe_child(directory, stream)
+            try:
+                with path.open("rb") as file:
+                    stat = os.fstat(file.fileno())
+                    if stat.st_size == 0:
+                        continue
+                    file.seek(-1, os.SEEK_END)
+                    if file.read(1) != b"\n":
+                        continue
+            except FileNotFoundError:
+                continue
+            if latest_mtime is None or stat.st_mtime > latest_mtime:
+                latest_mtime = stat.st_mtime
+                latest_stream = stream
+
+        if latest_mtime is None:
+            return {
+                "last_activity_at": None,
+                "last_activity_mtime": None,
+                "last_activity_stream": None,
+            }
+        return {
+            "last_activity_at": datetime.fromtimestamp(
+                latest_mtime, timezone.utc
+            ).isoformat().replace("+00:00", "Z"),
+            "last_activity_mtime": latest_mtime,
+            "last_activity_stream": latest_stream,
+        }
+
+    def iter_complete_records(self, run_id: str, stream: str) -> Iterator[JsonlRecord]:
+        if stream not in STREAMS:
+            raise SourceUnavailableError(f"Unsupported JSONL stream: {stream}")
+        directory = self.run_dir(run_id)
+        path = _safe_child(directory, stream)
+        identity = _file_identity(path)
+        if identity is None:
+            return
+
+        with path.open("rb") as file:
+            stat = os.fstat(file.fileno())
+            opened_identity = f"{stat.st_dev:x}:{stat.st_ino:x}"
+            if opened_identity != identity:
+                raise ResyncRequiredError(f"{stream} changed while it was being read.")
+            cutoff = stat.st_size
+            while file.tell() < cutoff:
+                offset = file.tell()
+                line = file.readline()
+                if not line.endswith(b"\n") or file.tell() > cutoff:
+                    break
+                if not line.strip():
+                    continue
+                try:
+                    value = json.loads(line.decode("utf-8"))
+                except (json.JSONDecodeError, UnicodeDecodeError) as error:
+                    raise InvalidJsonlError(
+                        stream, offset, "line is not valid UTF-8 JSON"
+                    ) from error
+                if not isinstance(value, dict):
+                    raise InvalidJsonlError(stream, offset, "record must be a JSON object")
+                yield JsonlRecord(stream, offset, identity, value)
+
     def read_manifest(self, run_id: str, required: bool = True) -> dict[str, Any] | None:
         directory = self.run_dir(run_id)
         path = _safe_child(directory, "manifest.json")
@@ -229,6 +296,18 @@ class JsonlRunReader:
             offsets[stream] = saved.offset
             identities[stream] = current_identity
         return directory, offsets, identities
+
+    def cursor_includes_record(
+        self,
+        run_id: str,
+        token: str,
+        stream: str,
+        record_offset: int,
+    ) -> bool:
+        if stream not in STREAMS:
+            raise InvalidCursorError("Cursor stream is not recognized.")
+        _, offsets, _ = self._cursor_for_run(run_id, token)
+        return offsets[stream] > record_offset
 
     @staticmethod
     def _ends_on_record_boundary(path: Path, offset: int) -> bool:

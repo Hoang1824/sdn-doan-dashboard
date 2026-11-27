@@ -25,15 +25,17 @@ import {
   MetricCard,
   Panel,
   StatusBadge,
-  formatTimestamp,
 } from '../components/ui'
+import { formatTimestamp } from '../components/formatTimestamp'
 import { useDashboard } from '../data/useDashboard'
 import { formatMetric, getVerifiedSourceCount } from '../data/presentation'
+import { RunControl } from './RunControl'
 import { NetworkOverview } from '../features/network/NetworkOverview'
 import { AIDetection } from '../features/detection/AIDetection'
 import { AttackAlerts } from '../features/alerts/AttackAlerts'
 import { MitigationPanel } from '../features/mitigation/MitigationPanel'
 import { AttackHistory } from '../features/history/AttackHistory'
+import { ReplaySummary } from '../features/history/ReplaySummary'
 import { PerformancePanel } from '../features/performance/PerformancePanel'
 import { SystemStatus } from '../features/system-status/SystemStatus'
 
@@ -56,13 +58,24 @@ const navigation = [
 ]
 
 export function DashboardLayout() {
-  const snapshot = useDashboard()
+  const { snapshot } = useDashboard()
   const [menuOpen, setMenuOpen] = useState(false)
   const [active, setActive] = useState('overview')
   const sidebar = useRef<HTMLElement>(null)
   const menuButton = useRef<HTMLButtonElement>(null)
   const restoreFocusOnClose = useRef(false)
   const websocket = snapshot.services.websocket.status
+  const websocketLabel = snapshot.dataMode === 'REPLAY'
+    ? 'REPLAY / HISTORY'
+    : websocket === 'connected'
+      ? 'WebSocket kết nối'
+      : websocket === 'connecting'
+        ? 'Đang kết nối'
+        : websocket === 'error'
+          ? 'Lỗi WebSocket'
+          : websocket === 'disconnected'
+            ? snapshot.dataMode === 'LIVE' ? 'Mất kết nối · đang thử lại' : 'WebSocket chưa kết nối'
+            : 'Chưa kết nối'
   const hasReceivedData =
     snapshot.receivedAt !== null && Number.isFinite(Date.parse(snapshot.receivedAt))
 
@@ -106,11 +119,17 @@ export function DashboardLayout() {
     restoreFocusOnClose.current = true
     const previousOverflow = document.body.style.overflow
     document.body.style.overflow = 'hidden'
-    const focusFrame = window.requestAnimationFrame(() => {
-      // Apply the responsive sidebar's visible layout before moving focus.
-      sidebar.current?.getBoundingClientRect()
-      sidebar.current?.querySelector<HTMLButtonElement>('button')?.focus()
-    })
+    let focusFrame = 0
+    const focusCloseButton = () => {
+      const panel = sidebar.current
+      if (!panel) return
+      if (getComputedStyle(panel).visibility !== 'visible') {
+        focusFrame = window.requestAnimationFrame(focusCloseButton)
+        return
+      }
+      panel.querySelector<HTMLButtonElement>('button')?.focus()
+    }
+    focusFrame = window.requestAnimationFrame(focusCloseButton)
     const handleKey = (event: KeyboardEvent) => {
       if (event.key === 'Escape') setMenuOpen(false)
       if (event.key !== 'Tab') return
@@ -212,9 +231,9 @@ export function DashboardLayout() {
               <span>NGUỒN DỮ LIỆU</span>
             </div>
             <strong>
-              {hasReceivedData ? 'Đã nhận dữ liệu hệ thống' : 'Chờ kết nối hệ thống'}
+              {hasReceivedData ? 'Đã nhận snapshot B8' : 'Chờ snapshot B8'}
             </strong>
-            <p>AI inference · Ryu controller</p>
+            <p>Read-only REST · WebSocket events</p>
             <a
               href="#system"
               onClick={() => {
@@ -253,17 +272,15 @@ export function DashboardLayout() {
             <span className="environment-label"><span /> SDN LAB</span>
             <a href="#system" className="connection-link">
               <StatusBadge
-                tone={websocket === 'connected' ? 'green' : websocket === 'error' ? 'red' : 'muted'}
+                tone={snapshot.dataMode === 'REPLAY'
+                  ? 'cyan'
+                  : websocket === 'connected'
+                    ? 'green'
+                    : websocket === 'error' || websocket === 'disconnected'
+                      ? 'red'
+                      : 'muted'}
               >
-                {websocket === 'connected'
-                  ? 'WebSocket kết nối'
-                  : websocket === 'connecting'
-                    ? 'Đang kết nối'
-                    : websocket === 'error'
-                      ? 'Lỗi WebSocket'
-                      : websocket === 'disconnected'
-                        ? 'Mất kết nối'
-                        : 'Chưa kết nối'}
+                {websocketLabel}
               </StatusBadge>
             </a>
             <span className="workspace-avatar" title="Không gian giám sát SDN">
@@ -272,6 +289,8 @@ export function DashboardLayout() {
           </div>
         </header>
         <main className="dashboard-content" id="main-content" tabIndex={-1}>
+          <RunControl />
+          <ReplaySummary snapshot={snapshot} />
           <div className="page-heading" id="overview">
             <div>
               <p className="page-eyebrow"><span /> SECURITY OPERATIONS CENTER</p>
@@ -279,7 +298,7 @@ export function DashboardLayout() {
               <p>Giám sát, phát hiện và theo dõi giảm thiểu DDoS trong mạng SDN.</p>
             </div>
             <div className="updated-at">
-              <span>DỮ LIỆU GẦN NHẤT</span>
+              <span>BROWSER NHẬN DỮ LIỆU</span>
               <strong>{formatTimestamp(snapshot.receivedAt)}</strong>
               <small>UTC+07:00</small>
             </div>
@@ -321,7 +340,7 @@ export function DashboardLayout() {
             />
             <MetricCard
               icon={LockKeyhole}
-              label="Nguồn đã chặn xác minh"
+              label="Nguồn active VERIFIED/DROPPING"
               value={formatMetric(getVerifiedSourceCount(snapshot))}
               note="Có bằng chứng controller / switch"
               accent="violet"
@@ -329,7 +348,12 @@ export function DashboardLayout() {
           </div>
           <div className="dashboard-grid analysis-grid">
             <NetworkOverview traffic={snapshot.network.traffic} />
-            <AIDetection detection={snapshot.detection} />
+            <AIDetection
+              detection={snapshot.detection}
+              policy={snapshot.detection?.sampleId
+                ? snapshot.policies.find((item) => item.sampleId === snapshot.detection?.sampleId) ?? null
+                : null}
+            />
           </div>
           <AttackAlerts alerts={snapshot.alerts} />
           <div className="section-divider">
@@ -350,14 +374,15 @@ export function DashboardLayout() {
             >
               <TopologyPanel />
             </Suspense>
-            <MitigationPanel rules={snapshot.mitigations} />
+            <MitigationPanel rules={snapshot.mitigations} complete={snapshot.mitigationsComplete} />
           </div>
-          <AttackHistory events={snapshot.history} />
+          <AttackHistory events={snapshot.history} dataMode={snapshot.dataMode} />
           <div className="dashboard-grid health-grid">
             <PerformancePanel performance={snapshot.performance} />
             <SystemStatus
               services={snapshot.services}
               receivedAt={snapshot.receivedAt}
+              dataMode={snapshot.dataMode}
             />
           </div>
           <footer className="dashboard-footer">
