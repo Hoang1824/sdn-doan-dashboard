@@ -141,8 +141,12 @@ The stages are evidence-driven, not inferred from event names:
   raw observation and has no computed delta.
 - `b8_mitigation_flow_removed` sets a removed state. With OpenFlow 1.3,
   `reason=0` is exposed as `REMOVED_IDLE`, while the raw reason remains
-  available. `removed` does not mean the rule never blocked traffic.
+  available. Its final packet/byte counters replace the prior cumulative
+  sample rather than being added to it. `removed` does not mean the rule never
+  blocked traffic.
 - `b8_mitigation_cleaned` sets `CLEANED` only when that event is present.
+  Cleaning changes the lifecycle status but does not delete the rule from the
+  snapshot or discard its evidence and final counters.
 
 For the documented cookie `0xb83524a71b55e4bc`, the expected replay sequence
 includes a counter of 142 and final `FlowRemoved.packet_count=7300`. The final
@@ -182,11 +186,17 @@ manifests are reported as unavailable metadata; they are not fabricated.
 Returns the reduced read-only state and a consistent per-stream
 `as_of_cursor`. Snapshot fields include:
 
-- run ID, manifest metadata, revision, `data_mode`, explicit `policy_mode`;
+- run ID, manifest metadata, revision, `data_mode`, explicit `policy_mode`.
+  `run.seed` uses `manifest.seed` when non-null, otherwise
+  `manifest.seed_reference`;
 - latest prediction and unique prediction count;
 - latest policy decisions;
 - mitigation rules keyed by DPID/cookie, lifecycle, evidence, latest
   cumulative packet/byte counts and valid deltas;
+- `verified_source_count`, the number of distinct non-empty source IPs on
+  rules whose **current** status is `VERIFIED` or `DROPPING`. This is not a
+  cumulative count of sources ever verified; `REMOVED`, `REMOVED_IDLE`, and
+  `CLEANED` rules are excluded even when their verification evidence remains;
 - phase observations and last source/backend receive times;
 - source availability. Unsupported traffic/performance values remain null.
 
@@ -248,6 +258,10 @@ backend does not hold file locks while sending network data.
 The workspace fixture tests verify a minimal S1/S8-shaped stream, incremental
 line handling, source precedence, idempotency, counter semantics, lifecycle,
 cursor pagination and WebSocket replay/reconnect. They do **not** certify the
-complete S8 run. Full acceptance still requires replaying the source files and
-checking each prediction ID, the 5927 total (5684 benign + 243 attack), six
-confirmed rules, and the cookie lifecycle/counter described above.
+complete S8 run. The operator has separately reported a successful replay of
+the real S1/S8 logs on Ubuntu Python 3.12. For S8 the reported results are:
+5927 predictions, six DROP rules across three source IPs and two protocols,
+all six rules `CLEANED` at the final snapshot, `verified_source_count=0`,
+`run.seed=1101` from `manifest.seed_reference`, and final
+`0xb83524a71b55e4bc.packet_count=7300` (not 7442). These are externally
+reported results, not a replay performed by the workspace tests.

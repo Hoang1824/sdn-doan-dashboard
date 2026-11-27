@@ -42,6 +42,28 @@ def test_s1_fixture_is_replay_and_keeps_run_metadata() -> None:
     assert len(snapshot["state"]["observations"]) == 2
 
 
+def test_snapshot_maps_seed_reference_when_manifest_seed_is_absent(tmp_path: Path) -> None:
+    run_id = "seed-reference-run"
+    run_dir = tmp_path / run_id
+    run_dir.mkdir()
+    (run_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "scenario": "S8",
+                "seed_reference": 1101,
+                "mode": "MITIGATE",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with TestClient(create_app(tmp_path)) as client:
+        response = client.get(f"/api/runs/{run_id}/snapshot")
+
+    assert response.status_code == 200
+    assert response.json()["run"]["seed"] == 1101
+
+
 def test_s8_fixture_counter_and_lifecycle_are_idempotent() -> None:
     with _client() as client:
         response = client.get(f"/api/runs/{S8_RUN}/snapshot")
@@ -64,6 +86,86 @@ def test_s8_fixture_counter_and_lifecycle_are_idempotent() -> None:
         for rule in state["rules"]
         if rule["cookie"] != S8_COOKIE
     )
+
+
+def test_snapshot_retains_all_cleaned_rules_and_final_flow_removed_counters(
+    tmp_path: Path,
+) -> None:
+    run_id = "cleaned-rules-run"
+    run_dir = tmp_path / run_id
+    run_dir.mkdir()
+    (run_dir / "manifest.json").write_text(
+        json.dumps({"scenario": "S8", "seed_reference": 1101, "mode": "MITIGATE"}),
+        encoding="utf-8",
+    )
+    records: list[dict] = []
+    target_cookie = "0xb83524a71b55e4bc"
+    for index in range(6):
+        src_ip = f"10.0.0.{10 + index // 2}"
+        ip_proto = 6 if index % 2 == 0 else 17
+        cookie = target_cookie if index == 0 else f"0xcafe00000000000{index:x}"
+        common = {
+            "run_id": run_id,
+            "sample_id": f"sample-{index}",
+            "cookie": cookie,
+            "dpid": 3,
+            "src_ip": src_ip,
+            "dst_ip": "10.0.0.100",
+            "ip_proto": ip_proto,
+            "mitigation_action": "DROP",
+        }
+        records.extend(
+            [
+                {
+                    **common,
+                    "event": "b8_mitigation_confirmed",
+                    "timestamp": 1795701900.0 + index,
+                },
+                {
+                    **common,
+                    "event": "b8_drop_counter",
+                    "timestamp": 1795701901.0 + index,
+                    "counter_source": "verified_flow_stats",
+                    "packet_count": 142,
+                    "byte_count": 10000,
+                },
+                {
+                    **common,
+                    "event": "b8_mitigation_flow_removed",
+                    "timestamp": 1795701902.0 + index,
+                    "reason": 0,
+                    "packet_count": 7300 if index == 0 else 20 + index,
+                    "byte_count": 394200 if index == 0 else 2000 + index,
+                },
+                {
+                    **common,
+                    "event": "b8_mitigation_cleaned",
+                    "timestamp": 1795701903.0 + index,
+                },
+            ]
+        )
+    (run_dir / "ryu_events.jsonl").write_text(
+        "".join(json.dumps(record) + "\n" for record in records),
+        encoding="utf-8",
+    )
+
+    with TestClient(create_app(tmp_path)) as client:
+        response = client.get(f"/api/runs/{run_id}/snapshot")
+
+    assert response.status_code == 200
+    snapshot = response.json()
+    state = snapshot["state"]
+    assert len(state["rules"]) == 6
+    assert len({rule["src_ip"] for rule in state["rules"]}) == 3
+    assert {rule["ip_proto"] for rule in state["rules"]} == {6, 17}
+    assert all(rule["status"] == "CLEANED" for rule in state["rules"])
+    assert all(rule["evidence"]["source"] == "controller" for rule in state["rules"])
+    assert state["verified_source_count"] == 0
+
+    target = next(rule for rule in state["rules"] if rule["cookie"] == target_cookie)
+    assert target["packet_count"] == 7300
+    assert target["byte_count"] == 394200
+    assert target["reason"] == 0
 
 
 def test_snapshot_accepts_phase_state_records_without_event_and_deduplicates_marker(
@@ -215,15 +317,88 @@ def test_event_page_then_websocket_resume_has_no_duplicate_ids() -> None:
         resumed_ids = [event["event_id"] for event in resumed_events]
         assert not set(first_ids).intersection(resumed_ids)
         assert len(resumed_ids) == len(set(resumed_ids))
+        assert len(first_ids + resumed_ids) == len(set(first_ids + resumed_ids))
+        last_applied_cursor = resumed_events[-1]["cursor"]
 
         reconnect_query = urlencode(
             {
-                "after": resumed_events[-1]["cursor"],
+                "after": last_applied_cursor,
                 "data_mode": "REPLAY",
             }
         )
         with client.websocket_connect(f"/ws/runs/{S8_RUN}?{reconnect_query}") as websocket:
-            assert websocket.receive_json()["type"] == "replay_complete"
+            frame = websocket.receive_json()
+            assert frame == {
+                "type": "replay_complete",
+                "cursor": last_applied_cursor,
+            }
+
+
+def test_snapshot_cursor_websocket_replay_and_reconnect_are_idempotent(
+    tmp_path: Path,
+) -> None:
+    run_id = "snapshot-ws-run"
+    run_dir = tmp_path / run_id
+    run_dir.mkdir()
+    (run_dir / "manifest.json").write_text(
+        json.dumps({"scenario": "S1", "seed": 701, "mode": "MITIGATE"}),
+        encoding="utf-8",
+    )
+    source = run_dir / "ryu_events.jsonl"
+    source.write_text(
+        json.dumps(
+            {
+                "event": "v2_prediction",
+                "run_id": run_id,
+                "id": "prediction-in-snapshot",
+                "timestamp": 1795701900.0,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    with TestClient(create_app(tmp_path)) as client:
+        snapshot_response = client.get(f"/api/runs/{run_id}/snapshot")
+        assert snapshot_response.status_code == 200
+        snapshot_cursor = snapshot_response.json()["as_of_cursor"]
+
+        with source.open("a", encoding="utf-8") as file:
+            file.write(
+                json.dumps(
+                    {
+                        "event": "v2_prediction",
+                        "run_id": run_id,
+                        "id": "prediction-after-snapshot",
+                        "timestamp": 1795701901.0,
+                    }
+                )
+                + "\n"
+            )
+
+        query = urlencode({"after": snapshot_cursor, "data_mode": "REPLAY"})
+        replayed: list[dict] = []
+        with client.websocket_connect(f"/ws/runs/{run_id}?{query}") as websocket:
+            while True:
+                frame = websocket.receive_json()
+                if frame["type"] == "replay_complete":
+                    break
+                assert frame["type"] == "event"
+                replayed.append(frame["event"])
+
+        assert [event["keys"]["sample_id"] for event in replayed] == [
+            "prediction-after-snapshot"
+        ]
+        last_applied_cursor = replayed[-1]["cursor"]
+
+        reconnect_query = urlencode(
+            {"after": last_applied_cursor, "data_mode": "REPLAY"}
+        )
+        with client.websocket_connect(f"/ws/runs/{run_id}?{reconnect_query}") as websocket:
+            assert websocket.receive_json() == {
+                "type": "replay_complete",
+                "cursor": last_applied_cursor,
+            }
 
 
 def test_websocket_requires_snapshot_cursor() -> None:

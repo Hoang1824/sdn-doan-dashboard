@@ -53,7 +53,11 @@ class B8DashboardService:
         )
         return {
             "scenario": manifest.get("scenario"),
-            "seed": manifest.get("seed"),
+            "seed": (
+                manifest.get("seed")
+                if manifest.get("seed") is not None
+                else manifest.get("seed_reference")
+            ),
             "status": manifest.get("status"),
             "policy_mode": policy_mode,
             "revision": revisions,
