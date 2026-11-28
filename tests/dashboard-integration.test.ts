@@ -9,6 +9,15 @@ import {
 } from '../frontend/src/data/b8-api.ts'
 import { B8LiveFeed } from '../frontend/src/data/b8-live-feed.ts'
 import { B8DashboardReducer, mapHistoryEvent, mapSnapshot } from '../frontend/src/data/b8-read-model.ts'
+import {
+  clearReplayHistorySearchCache,
+  getReplayHistorySearch,
+  MAX_REPLAY_HISTORY_CACHE_CURSORS,
+  MAX_REPLAY_HISTORY_CACHE_ENTRIES,
+  MAX_REPLAY_HISTORY_CACHE_EVENTS,
+  replayHistorySearchKey,
+  setReplayHistorySearch,
+} from '../frontend/src/data/replay-history-cache.ts'
 
 const browserAt = '2026-11-27T16:00:00.000Z'
 
@@ -253,6 +262,60 @@ test('S8 history categories match normalized kinds, raw events, and prediction l
   assert.equal(category('other', 'OVS_DON_LUAT'), 'removed_cleaned')
   assert.equal(category('other', 'b8_mitigation_flow_removed'), 'removed_cleaned')
   assert.equal(category('other', 'b8_mitigation_cleaned'), 'removed_cleaned')
+})
+
+test('REPLAY history cache keys isolate run/filter and retain bounded partial-search metadata', () => {
+  clearReplayHistorySearchCache()
+  const key = replayHistorySearchKey('s8-run', 'REPLAY', 'ai_attack', '')
+  const otherFilterKey = replayHistorySearchKey('s8-run', 'REPLAY', 'drop_control', '')
+  const otherRunKey = replayHistorySearchKey('s1-run', 'REPLAY', 'ai_attack', '')
+  const events = Array.from({ length: MAX_REPLAY_HISTORY_CACHE_EVENTS + 2 }, (_, index) => (
+    mapHistoryEvent(event(`cached-event-${index}`, 'ai.prediction', { prediction: 'syn_flood' }), browserAt)
+  ))
+  const cursorHistory = Array.from({ length: MAX_REPLAY_HISTORY_CACHE_CURSORS + 3 }, (_, index) => `cursor-${index}`)
+
+  setReplayHistorySearch(key, {
+    runId: 's8-run',
+    dataMode: 'REPLAY',
+    filter: 'ai_attack',
+    query: '',
+    events: [...events, events[0]],
+    pagesScanned: 200,
+    eventsScanned: 20_000,
+    status: 'partial',
+    message: 'Search stopped at configured bounds.',
+    nextCursor: 'resume-cursor',
+    cursorHistory,
+    resumeAllowed: false,
+  })
+
+  assert.equal(getReplayHistorySearch(key)?.events.length, MAX_REPLAY_HISTORY_CACHE_EVENTS)
+  assert.equal(getReplayHistorySearch(key)?.cursorHistory.length, MAX_REPLAY_HISTORY_CACHE_CURSORS)
+  assert.equal(getReplayHistorySearch(key)?.status, 'partial')
+  assert.equal(getReplayHistorySearch(key)?.nextCursor, 'resume-cursor')
+  assert.equal(getReplayHistorySearch(key)?.resumeAllowed, false)
+  assert.equal(getReplayHistorySearch(otherFilterKey), null)
+  assert.equal(getReplayHistorySearch(otherRunKey), null)
+
+  for (let index = 0; index < MAX_REPLAY_HISTORY_CACHE_ENTRIES; index += 1) {
+    const extraKey = replayHistorySearchKey(`run-${index}`, 'REPLAY', 'ai_attack', '')
+    setReplayHistorySearch(extraKey, {
+      runId: `run-${index}`,
+      dataMode: 'REPLAY',
+      filter: 'ai_attack',
+      query: '',
+      events: [],
+      pagesScanned: 0,
+      eventsScanned: 0,
+      status: 'complete',
+      message: 'Complete.',
+      nextCursor: null,
+      cursorHistory: [],
+      resumeAllowed: false,
+    })
+  }
+  assert.equal(getReplayHistorySearch(key), null)
+  clearReplayHistorySearchCache()
 })
 
 test('snapshot maps B8 metadata and leaves unavailable traffic/latency metrics null', () => {

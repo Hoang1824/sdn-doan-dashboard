@@ -112,6 +112,14 @@ export interface B8SnapshotResponse {
   }>
 }
 
+export interface B8EventPage {
+  readonly run_id: string
+  readonly data_mode: 'REPLAY'
+  readonly events: readonly B8NormalizedEvent[]
+  readonly next_cursor: string
+  readonly has_more: boolean
+}
+
 export interface B8WebSocketLike {
   readonly readyState: number
   onopen: ((event: Event) => void) | null
@@ -327,6 +335,26 @@ export function parseEvent(value: unknown): B8NormalizedEvent {
       cookie: nullableString(keys.cookie, 'event cookie'),
     },
     payload,
+  }
+}
+
+export function parseEventPage(value: unknown): B8EventPage {
+  const page = requireRecord(value, 'event page')
+  if (!Array.isArray(page.events)) throw new B8ApiError('Invalid event page events.')
+  const runId = requireString(page.run_id, 'event page run_id')
+  const dataMode = requireDataMode(page.data_mode)
+  if (dataMode !== 'REPLAY') throw new B8ApiError('Event history page must use REPLAY mode.')
+  const events = page.events.map(parseEvent)
+  if (events.some((event) => event.run_id !== runId || event.data_mode !== dataMode)) {
+    throw new B8ApiError('Event page contains an event for a different run or data mode.')
+  }
+  if (typeof page.has_more !== 'boolean') throw new B8ApiError('Invalid event page has_more.')
+  return {
+    run_id: runId,
+    data_mode: dataMode,
+    events,
+    next_cursor: requireString(page.next_cursor, 'event page next_cursor'),
+    has_more: page.has_more,
   }
 }
 
@@ -554,6 +582,25 @@ export class B8DashboardClient {
       signal,
     )
     return parseSnapshot(response)
+  }
+
+  async getEvents(
+    runId: string,
+    after: string | null,
+    limit = 100,
+    signal?: AbortSignal,
+  ): Promise<B8EventPage> {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 500) {
+      throw new B8ApiError('Event page limit must be between 1 and 500.')
+    }
+    const query = new URLSearchParams({ limit: String(limit), data_mode: 'REPLAY' })
+    if (after !== null) query.set('after', after)
+    const page = parseEventPage(await this.request(
+      `/api/runs/${encodeURIComponent(runId)}/events?${query.toString()}`,
+      signal,
+    ))
+    if (page.run_id !== runId) throw new B8ApiError('Event page does not match the requested run.')
+    return page
   }
 
   openLive(runId: string, cursor: string): B8WebSocketLike {

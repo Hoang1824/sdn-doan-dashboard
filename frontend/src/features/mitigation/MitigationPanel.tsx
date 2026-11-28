@@ -42,23 +42,33 @@ export function MitigationPanel({
   complete?: boolean
 }) {
   const [expandedId, setExpandedId] = useState<string | null>(null)
+  const [showAll, setShowAll] = useState(false)
   const controlId = useId()
+  const visibleRules = showAll ? rules : rules.slice(0, 8)
 
   return (
     <Panel id="mitigation" title="Mitigation" kicker="KIỂM SOÁT & GIẢM THIỂU"
-      subtitle="Trạng thái luật DROP và bằng chứng xác minh."
+      subtitle={`${complete ? rules.length : 'Tối đa 500'} luật · trạng thái lifecycle và counter cuối`}
       className="mitigation-panel"
       action={<ShieldCheck size={19} className="text-muted" aria-hidden="true" />}>
+      {rules.length > 8 && (
+        <div className="mitigation-toolbar">
+          <span>{showAll ? `Đang xem ${rules.length} luật` : `Đang xem 8 / ${rules.length} luật`}</span>
+          <button type="button" className="button button-ghost" onClick={() => setShowAll((value) => !value)}>
+            {showAll ? 'Thu gọn' : 'Xem tất cả'}
+          </button>
+        </div>
+      )}
       <div className="table-scroll" tabIndex={0} role="region" aria-label="Bảng luật giảm thiểu">
         <table className="data-table mitigation-table">
           <caption className="sr-only">Các luật giảm thiểu do hệ thống cung cấp</caption>
           <thead><tr>
             <th scope="col">IP nguồn</th><th scope="col">Protocol</th>
-            <th scope="col">DPID / switch</th><th scope="col">Hành động</th>
+            <th scope="col">DPID / switch</th><th scope="col">Cookie</th><th scope="col">Hành động</th>
             <th scope="col">Packet count</th><th scope="col">Lifecycle</th>
           </tr></thead>
           <tbody>
-            {rules.map((rule, index) => {
+            {visibleRules.map((rule, index) => {
               const status = getMitigationStatus(rule)
               const expanded = rule.id === expandedId
               const detailId = `${controlId}-rule-${index}`
@@ -67,6 +77,7 @@ export function MitigationPanel({
                   <td className="mono">{rule.sourceIp || 'Chưa có dữ liệu'}</td>
                   <td>{protocolLabel(rule.ipProtocol)}</td>
                   <td className="mono">{rule.dpid === null ? 'Chưa có dữ liệu' : `DPID ${rule.dpid}`}</td>
+                  <td className="mono">{rule.cookie ?? 'Chưa có dữ liệu'}</td>
                   <td className="mono">{rule.rule || 'Chưa có dữ liệu'}</td>
                   <td className="mono">{rule.packetCount === null ? 'Chưa có dữ liệu' : rule.packetCount.toLocaleString('en-US')}</td>
                   <td><button type="button" className="rule-detail-button" aria-expanded={expanded}
@@ -76,7 +87,7 @@ export function MitigationPanel({
                     <ChevronDown size={14} aria-hidden="true" style={{ transform: expanded ? 'rotate(180deg)' : undefined }} />
                   </button></td>
                 </tr>
-                {expanded && <tr className="detail-row" id={detailId}><td colSpan={6}>
+                {expanded && <tr className="detail-row" id={detailId}><td colSpan={7}>
                   <dl className="event-details">
                     <div><dt>Mã luật</dt><dd className="mono">{rule.id}</dd></div>
                     <div><dt>Cập nhật (UTC+07:00)</dt><dd>{formatTime(rule.updatedAt)}</dd></div>
@@ -97,7 +108,7 @@ export function MitigationPanel({
                 </td></tr>}
               </Fragment>
             })}
-            {rules.length === 0 && <tr><td colSpan={6}>
+            {rules.length === 0 && <tr><td colSpan={7}>
               <EmptyState icon={LockKeyhole} title="Chưa có bản ghi giảm thiểu"
                 description="IP nguồn và luật DROP sẽ hiển thị khi nhận được bản ghi từ hệ thống." />
             </td></tr>}

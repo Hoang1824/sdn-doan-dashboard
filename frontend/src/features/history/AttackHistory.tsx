@@ -1,12 +1,18 @@
 import { Fragment, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { ChevronDown, ChevronLeft, ChevronRight, History, Search } from 'lucide-react'
 import { EmptyState, Panel, StatusBadge } from '../../components/ui'
+import {
+  getReplayHistorySearch,
+  MAX_REPLAY_HISTORY_CACHE_EVENTS,
+  MAX_REPLAY_HISTORY_SEARCH_PAGES,
+  replayHistorySearchKey,
+  setReplayHistorySearch,
+} from '../../data/replay-history-cache'
+import type { ReplayHistorySearchCacheEntry } from '../../data/replay-history-cache'
 import { useDashboard } from '../../data/useDashboard'
 import type { DashboardDataMode, HistoryEvent, HistoryEventPage } from '../../types/dashboard'
 
 const pageSize = 6
-const maxHistorySearchPages = 200
-const maxHistorySearchResults = 500
 const filters = [
   { value: 'all', label: 'Tất cả' },
   { value: 'ai_attack', label: 'AI Attack Detection' },
@@ -15,13 +21,8 @@ const filters = [
   { value: 'verified_counter', label: 'Verified DROP Counter' },
   { value: 'removed_cleaned', label: 'Removed / Cleaned' },
 ] as const
+const maxConcurrentHistorySearches = 3
 type TimelineFilter = (typeof filters)[number]['value']
-type SearchProgress = {
-  readonly status: 'searching' | 'complete' | 'partial' | 'cancelled'
-  readonly pagesScanned: number
-  readonly eventsScanned: number
-  readonly message: string
-}
 
 const kindLabels: Record<HistoryEvent['kind'], string> = {
   detection: 'Phát hiện',
@@ -85,23 +86,31 @@ export function AttackHistory({
   const { loadHistoryPage, snapshot } = useDashboard()
   const [query, setQuery] = useState('')
   const [filter, setFilter] = useState<TimelineFilter>('all')
+  const searchKey = runId && dataMode === 'REPLAY'
+    ? replayHistorySearchKey(runId, 'REPLAY', filter, query)
+    : null
+  const [searchEntry, setSearchEntry] = useState<ReplayHistorySearchCacheEntry | null>(
+    () => searchKey ? getReplayHistorySearch(searchKey) : null,
+  )
+  const activeSearchKeyRef = useRef(searchKey)
   const [page, setPage] = useState(1)
   const [expandedId, setExpandedId] = useState<string | null>(null)
   const [apiPage, setApiPage] = useState<HistoryEventPage | null>(null)
-  const [historySearchEvents, setHistorySearchEvents] = useState<HistoryEvent[] | null>(null)
-  const [searchProgress, setSearchProgress] = useState<SearchProgress | null>(null)
   const [apiCursors, setApiCursors] = useState<Array<string | null>>([null])
   const [apiPageIndex, setApiPageIndex] = useState(0)
   const [apiLoading, setApiLoading] = useState(false)
   const [apiError, setApiError] = useState<string | null>(null)
   const requestId = useRef(0)
   const abortRef = useRef<AbortController | null>(null)
-  const searchRequestId = useRef(0)
-  const searchAbortRef = useRef<AbortController | null>(null)
+  const searchRequestSequence = useRef(0)
+  const searchRequestsRef = useRef(new Map<string, {
+    readonly id: number
+    readonly controller: AbortController
+  }>())
   const controlId = useId()
   const usingApi = apiPage !== null
-  const usingSearch = historySearchEvents !== null
-  const sourceEvents = historySearchEvents ?? apiPage?.events ?? events
+  const usingSearch = searchEntry !== null
+  const sourceEvents = searchEntry?.events ?? apiPage?.events ?? events
   const snapshotForRun = snapshot.run?.runId === runId ? snapshot : null
   const attackSnapshotEvents = snapshotForRun?.alerts
     .filter((event) => event.category === 'attack_prediction') ?? []
@@ -113,13 +122,28 @@ export function AttackHistory({
     && snapshotStatus !== undefined
     && ['aborted', 'cancelled', 'canceled', 'complete', 'completed', 'failed']
       .includes(snapshotStatus.trim().toLowerCase())
-  const isSearchingAllHistory = searchProgress?.status === 'searching'
+  const isSearchingAllHistory = searchEntry?.status === 'searching'
+
+  useEffect(() => {
+    activeSearchKeyRef.current = searchKey
+  }, [searchKey])
 
   useEffect(() => () => {
     requestId.current += 1
     abortRef.current?.abort()
-    searchRequestId.current += 1
-    searchAbortRef.current?.abort()
+    for (const [key, request] of searchRequestsRef.current) {
+      request.controller.abort()
+      const cached = getReplayHistorySearch(key)
+      if (cached?.status === 'searching') {
+        setReplayHistorySearch(key, {
+          ...cached,
+          status: 'cancelled',
+          message: `Đã dừng khi rời run/khu vực sau ${cached.pagesScanned} trang; kết quả đã giữ trong cache.`,
+          resumeAllowed: true,
+        })
+      }
+    }
+    searchRequestsRef.current.clear()
   }, [])
 
   const filtered = useMemo(() => {
@@ -133,16 +157,34 @@ export function AttackHistory({
   const hasFilters = query.trim() !== '' || filter !== 'all'
   const canLoadApiHistory = dataMode === 'REPLAY' && runId !== null
 
-  function invalidateHistorySearch() {
-    searchAbortRef.current?.abort()
-    searchRequestId.current += 1
-    setHistorySearchEvents(null)
-    setSearchProgress(null)
+  function saveSearchEntry(key: string, entry: ReplayHistorySearchCacheEntry) {
+    setReplayHistorySearch(key, entry)
+    if (activeSearchKeyRef.current === key) setSearchEntry(entry)
+  }
+
+  function selectFilter(nextFilter: TimelineFilter) {
+    const nextKey = runId && dataMode === 'REPLAY'
+      ? replayHistorySearchKey(runId, 'REPLAY', nextFilter, query)
+      : null
+    activeSearchKeyRef.current = nextKey
+    setSearchEntry(nextKey ? getReplayHistorySearch(nextKey) : null)
+    setFilter(nextFilter)
+    setPage(1)
+  }
+
+  function selectQuery(nextQuery: string) {
+    const nextKey = runId && dataMode === 'REPLAY'
+      ? replayHistorySearchKey(runId, 'REPLAY', filter, nextQuery)
+      : null
+    activeSearchKeyRef.current = nextKey
+    setSearchEntry(nextKey ? getReplayHistorySearch(nextKey) : null)
+    setQuery(nextQuery)
+    setPage(1)
   }
 
   async function loadApiPage(index: number, cursor: string | null) {
     if (!canLoadApiHistory || !runId) return
-    invalidateHistorySearch()
+    setSearchEntry(null)
     if (cursor !== null && apiCursors.slice(0, index).includes(cursor)) {
       setApiError('Cursor đã được dùng cho trang trước; dừng duyệt để tránh lặp dữ liệu.')
       return
@@ -180,134 +222,192 @@ export function AttackHistory({
   }
 
   async function searchWholeHistory() {
-    if (!canLoadApiHistory || !runId || !hasFilters) return
-    searchAbortRef.current?.abort()
-    const controller = new AbortController()
-    searchAbortRef.current = controller
-    const currentRequest = ++searchRequestId.current
-    const seenCursors = new Set<string>()
-    const seenEventIds = new Set<string>()
-    const matches: HistoryEvent[] = []
-    let cursor: string | null = null
-    let pagesScanned = 0
-    let eventsScanned = 0
-    let resultLimitReached = false
+    if (!canLoadApiHistory || !runId || !searchKey || !hasFilters) return
+    const key = searchKey
+    const running = searchRequestsRef.current.get(key)
+    if (running) return
 
-    setHistorySearchEvents([])
-    setSearchProgress({
-      status: 'searching',
-      pagesScanned: 0,
-      eventsScanned: 0,
-      message: 'Đang quét lịch sử REPLAY từ đầu…',
+    const previous = getReplayHistorySearch(key)
+    if (previous?.status === 'complete' || (previous && !previous.resumeAllowed)) {
+      setSearchEntry(previous)
+      return
+    }
+    if (searchRequestsRef.current.size >= maxConcurrentHistorySearches) {
+      saveSearchEntry(key, {
+        runId,
+        dataMode: 'REPLAY',
+        filter,
+        query,
+        events: previous?.events ?? [],
+        pagesScanned: previous?.pagesScanned ?? 0,
+        eventsScanned: previous?.eventsScanned ?? 0,
+        status: 'partial',
+        message: `Chưa bắt đầu: tối đa ${maxConcurrentHistorySearches} tìm kiếm REPLAY chạy đồng thời.`,
+        nextCursor: previous?.nextCursor ?? null,
+        cursorHistory: previous?.cursorHistory ?? [],
+        resumeAllowed: true,
+      })
+      return
+    }
+
+    const controller = new AbortController()
+    const currentRequest = ++searchRequestSequence.current
+    searchRequestsRef.current.set(key, { id: currentRequest, controller })
+    const cursorHistory = [...(previous?.cursorHistory ?? [])]
+    const seenCursors = new Set(cursorHistory)
+    const seenEventIds = new Set((previous?.events ?? []).map((event) => event.id))
+    const matches = [...(previous?.events ?? [])]
+    let cursor = previous?.nextCursor ?? null
+    let pagesScanned = previous?.pagesScanned ?? 0
+    let eventsScanned = previous?.eventsScanned ?? 0
+    let resultLimitReached = false
+    const isCurrentSearch = () => (
+      searchRequestsRef.current.get(key)?.id === currentRequest
+      && !controller.signal.aborted
+    )
+    const persist = (
+      status: ReplayHistorySearchCacheEntry['status'],
+      message: string,
+      nextCursor: string | null,
+      resumeAllowed: boolean,
+    ) => saveSearchEntry(key, {
+      runId,
+      dataMode: 'REPLAY',
+      filter,
+      query,
+      events: [...matches],
+      pagesScanned,
+      eventsScanned,
+      status,
+      message,
+      nextCursor,
+      cursorHistory: [...cursorHistory],
+      resumeAllowed,
     })
+
+    persist('searching', 'Đang quét lịch sử REPLAY từ đầu…', cursor, true)
     setPage(1)
     setExpandedId(null)
 
     try {
-      while (pagesScanned < maxHistorySearchPages) {
-        if (controller.signal.aborted || searchRequestId.current !== currentRequest) return
+      while (pagesScanned < MAX_REPLAY_HISTORY_SEARCH_PAGES) {
+        if (!isCurrentSearch()) return
         if (cursor !== null && seenCursors.has(cursor)) {
-          setSearchProgress({
-            status: 'partial',
-            pagesScanned,
-            eventsScanned,
-            message: 'Tìm kiếm một phần: API trả cursor đã dùng; đã dừng để tránh vòng lặp.',
-          })
+          persist(
+            'partial',
+            'Tìm kiếm một phần: API trả cursor đã dùng; đã dừng để tránh vòng lặp.',
+            null,
+            false,
+          )
           return
         }
-        if (cursor !== null) seenCursors.add(cursor)
-
         const result = await loadHistoryPage(runId, cursor, controller.signal)
-        if (controller.signal.aborted || searchRequestId.current !== currentRequest) return
+        if (!isCurrentSearch()) return
         pagesScanned += 1
+        if (cursor !== null) {
+          seenCursors.add(cursor)
+          cursorHistory.push(cursor)
+        }
 
         for (const event of result.events) {
           if (seenEventIds.has(event.id)) continue
           seenEventIds.add(event.id)
           eventsScanned += 1
           if (!matchesTimelineEvent(event, filter, query)) continue
-          if (matches.length < maxHistorySearchResults) matches.push(event)
+          if (matches.length < MAX_REPLAY_HISTORY_CACHE_EVENTS) matches.push(event)
           else resultLimitReached = true
         }
 
-        setHistorySearchEvents([...matches])
-        setSearchProgress({
-          status: 'searching',
-          pagesScanned,
-          eventsScanned,
-          message: `Đã quét ${pagesScanned} trang, ${eventsScanned} event Ryu/phase.`,
-        })
+        const nextCursor = result.hasMore ? result.nextCursor : null
+        persist(
+          'searching',
+          `Đã quét ${pagesScanned} trang, ${eventsScanned} event Ryu/phase.`,
+          nextCursor,
+          true,
+        )
 
         if (resultLimitReached) {
-          setSearchProgress({
-            status: 'partial',
-            pagesScanned,
-            eventsScanned,
-            message: `Tìm kiếm một phần: đạt giới hạn ${maxHistorySearchResults} kết quả phù hợp.`,
-          })
+          persist(
+            'partial',
+            `Tìm kiếm một phần: đạt giới hạn ${MAX_REPLAY_HISTORY_CACHE_EVENTS} kết quả phù hợp.`,
+            null,
+            false,
+          )
           return
         }
         if (!result.hasMore) {
-          setSearchProgress({
-            status: 'complete',
-            pagesScanned,
-            eventsScanned,
-            message: `Đã quét hết ${pagesScanned} trang (${eventsScanned} event Ryu/phase).`,
-          })
+          persist(
+            'complete',
+            `Đã quét hết ${pagesScanned} trang (${eventsScanned} event Ryu/phase).`,
+            null,
+            false,
+          )
           return
         }
         if (
           result.nextCursor === cursor
           || seenCursors.has(result.nextCursor)
         ) {
-          setSearchProgress({
-            status: 'partial',
-            pagesScanned,
-            eventsScanned,
-            message: 'Tìm kiếm một phần: API trả cursor lặp; đã dừng để tránh vòng lặp.',
-          })
+          persist(
+            'partial',
+            'Tìm kiếm một phần: API trả cursor lặp; đã dừng để tránh vòng lặp.',
+            null,
+            false,
+          )
           return
         }
         cursor = result.nextCursor
       }
 
-      setSearchProgress({
-        status: 'partial',
-        pagesScanned,
-        eventsScanned,
-        message: `Tìm kiếm một phần: đạt giới hạn ${maxHistorySearchPages} trang.`,
-      })
+      persist(
+        'partial',
+        `Tìm kiếm một phần: đạt giới hạn ${MAX_REPLAY_HISTORY_SEARCH_PAGES} trang.`,
+        cursor,
+        false,
+      )
     } catch (cause) {
-      if (controller.signal.aborted || searchRequestId.current !== currentRequest) return
-      setSearchProgress({
-        status: 'partial',
-        pagesScanned,
-        eventsScanned,
-        message: `Tìm kiếm một phần; lỗi khi tải API: ${cause instanceof Error ? cause.message : 'lỗi không xác định'}`,
-      })
+      if (!isCurrentSearch()) return
+      persist(
+        'partial',
+        `Tìm kiếm một phần; lỗi khi tải API: ${cause instanceof Error ? cause.message : 'lỗi không xác định'}`,
+        cursor,
+        true,
+      )
+    } finally {
+      if (searchRequestsRef.current.get(key)?.id === currentRequest) {
+        searchRequestsRef.current.delete(key)
+      }
     }
   }
 
   function cancelWholeHistorySearch() {
-    if (!isSearchingAllHistory) return
-    searchAbortRef.current?.abort()
-    searchRequestId.current += 1
-    setSearchProgress((current) => current ? {
-      ...current,
+    if (!searchKey) return
+    const running = searchRequestsRef.current.get(searchKey)
+    if (!running) return
+    running.controller.abort()
+    searchRequestsRef.current.delete(searchKey)
+    const cached = getReplayHistorySearch(searchKey)
+    if (cached) saveSearchEntry(searchKey, {
+      ...cached,
       status: 'cancelled',
-      message: `Đã hủy sau ${current.pagesScanned} trang (${current.eventsScanned} event Ryu/phase); kết quả hiện có là một phần.`,
-    } : current)
+      message: `Đã hủy sau ${cached.pagesScanned} trang (${cached.eventsScanned} event Ryu/phase); kết quả hiện có là một phần.`,
+      resumeAllowed: true,
+    })
   }
 
   function resetFilters() {
-    invalidateHistorySearch()
+    const nextKey = runId && dataMode === 'REPLAY'
+      ? replayHistorySearchKey(runId, 'REPLAY', 'all', '')
+      : null
+    activeSearchKeyRef.current = nextKey
+    setSearchEntry(nextKey ? getReplayHistorySearch(nextKey) : null)
     setQuery('')
     setFilter('all')
     setPage(1)
   }
 
   function showSnapshotHistory() {
-    invalidateHistorySearch()
+    setSearchEntry(null)
     abortRef.current?.abort()
     requestId.current += 1
     setApiPage(null)
@@ -351,16 +451,15 @@ export function AttackHistory({
               className="button button-ghost"
               disabled={isSearchingAllHistory}
               onClick={() => {
-                setHistorySearchEvents(null)
-                setSearchProgress(null)
+                setSearchEntry(null)
                 setPage(1)
               }}
             >
               Quay lại trang/snapshot
             </button>
-            {searchProgress && (
+            {searchEntry && (
               <span role="status" aria-live="polite">
-                {searchProgress.message} · tìm thấy {historySearchEvents.length} event phù hợp
+                {searchEntry.message} · tìm thấy {searchEntry.events.length} event phù hợp
               </span>
             )}
             {isSearchingAllHistory && (
@@ -370,6 +469,15 @@ export function AttackHistory({
                 onClick={cancelWholeHistorySearch}
               >
                 Hủy tìm kiếm
+              </button>
+            )}
+            {searchEntry?.resumeAllowed && !isSearchingAllHistory && (
+              <button
+                type="button"
+                className="button button-ghost"
+                onClick={() => void searchWholeHistory()}
+              >
+                Tiếp tục tìm
               </button>
             )}
           </>
@@ -524,11 +632,7 @@ export function AttackHistory({
             type="search"
             value={query}
             placeholder="Tìm IP, mã hoặc nội dung sự kiện…"
-            onChange={(event) => {
-              invalidateHistorySearch()
-              setQuery(event.target.value)
-              setPage(1)
-            }}
+            onChange={(event) => selectQuery(event.target.value)}
           />
         </label>
         {hasFilters && (
@@ -543,11 +647,7 @@ export function AttackHistory({
             key={item.value}
             type="button"
             aria-pressed={filter === item.value}
-            onClick={() => {
-              invalidateHistorySearch()
-              setFilter(item.value)
-              setPage(1)
-            }}
+            onClick={() => selectFilter(item.value)}
           >
             {item.label}
           </button>
@@ -609,7 +709,7 @@ export function AttackHistory({
                   title={sourceEvents.length === 0 ? 'Không có event trong phạm vi đang xem' : 'Không tìm thấy sự kiện phù hợp'}
                   description={sourceEvents.length === 0
                     ? usingSearch
-                      ? searchProgress?.status === 'complete'
+                      ? searchEntry?.status === 'complete'
                         ? 'Đã quét hết phạm vi API được báo cáo nhưng không có event khớp filter.'
                         : 'Chưa có event khớp trong phần đã quét; xem tiến độ/phạm vi tìm kiếm phía trên.'
                       : usingApi
@@ -618,7 +718,7 @@ export function AttackHistory({
                           : 'Trang API này không có event khớp; đây là trang cuối của history.'
                       : 'Snapshot chỉ giữ tối đa 500 event gần nhất. Duyệt lịch sử API để kiểm tra các trang còn lại.'
                     : usingSearch
-                      ? searchProgress?.message ?? 'Không có kết quả trong phần lịch sử đã quét.'
+                      ? searchEntry?.message ?? 'Không có kết quả trong phần lịch sử đã quét.'
                       : 'Không có event khớp trên trang/buffer hiện tại; thử trang API khác hoặc xóa bộ lọc. Đây không phải kết luận toàn run không có tấn công.'}
                   compact
                 />
@@ -631,12 +731,12 @@ export function AttackHistory({
         <span className="text-muted" aria-live="polite">
           {filtered.length === 0
             ? usingSearch
-              ? `0 kết quả trong phần đã quét${searchProgress?.status === 'complete' ? ' hết lịch sử API' : ' một phần'}`
+              ? `0 kết quả trong phần đã quét${searchEntry?.status === 'complete' ? ' hết lịch sử API' : ' một phần'}`
               : usingApi
                 ? `0 bản ghi khớp trên trang API ${apiPageIndex + 1}`
                 : '0 bản ghi trong buffer/snapshot đang xem'
             : usingSearch
-              ? `${(currentPage - 1) * pageSize + 1}–${Math.min(currentPage * pageSize, filtered.length)} / ${filtered.length} kết quả đã tải${searchProgress?.status === 'complete' ? ' · đã quét hết API' : ' · phạm vi một phần'}`
+              ? `${(currentPage - 1) * pageSize + 1}–${Math.min(currentPage * pageSize, filtered.length)} / ${filtered.length} kết quả đã tải${searchEntry?.status === 'complete' ? ' · đã quét hết API' : ' · phạm vi một phần'}`
               : usingApi
                 ? `${(currentPage - 1) * pageSize + 1}–${Math.min(currentPage * pageSize, filtered.length)} / ${filtered.length} bản ghi khớp trên trang API ${apiPageIndex + 1}`
                 : `${(currentPage - 1) * pageSize + 1}–${Math.min(currentPage * pageSize, filtered.length)} / ${filtered.length} bản ghi trong buffer/snapshot`}

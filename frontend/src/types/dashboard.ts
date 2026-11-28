@@ -165,10 +165,27 @@ export interface HistoryEvent {
   readonly id: string
   readonly timestamp: string
   readonly sourceIp: string | null
+  readonly rawEvent: string | null
+  readonly sampleId: string | null
+  readonly cookie: string | null
+  readonly dpid: number | string | null
+  readonly timelineCategory:
+    | 'ai_attack'
+    | 'ryu_policy'
+    | 'drop_control'
+    | 'verified_counter'
+    | 'removed_cleaned'
+    | 'other'
   readonly kind: 'detection' | 'mitigation' | 'system'
   readonly description: string
   readonly severity: 'info' | 'warning' | 'critical'
   readonly times: EventTimes
+}
+
+export interface HistoryEventPage {
+  readonly events: readonly HistoryEvent[]
+  readonly nextCursor: string
+  readonly hasMore: boolean
 }
 
 export interface DashboardSnapshot {
@@ -227,4 +244,5 @@ export interface DashboardContextValue {
   setRequestedDataMode(mode: DashboardDataMode): void
   loadSnapshot(): void
   refreshRuns(): void
+  loadHistoryPage(runId: string, after: string | null, signal?: AbortSignal): Promise<HistoryEventPage>
 }

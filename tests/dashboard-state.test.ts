@@ -1,7 +1,15 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { createInitialSnapshot } from '../frontend/src/data/initial-state.ts'
-import { formatMetric, getMitigationStatus, getVerifiedSourceCount } from '../frontend/src/data/presentation.ts'
+import {
+  formatMetric,
+  getAttackPredictionCount,
+  getConfirmedDropRuleCount,
+  getEverDroppedSourceCount,
+  getFinalDropPacketCount,
+  getMitigationStatus,
+  getVerifiedSourceCount,
+} from '../frontend/src/data/presentation.ts'
 import type { DashboardSnapshot, MitigationRule } from '../frontend/src/types/dashboard.ts'
 
 // Evidence below is a test fixture only and is never imported into the app.
@@ -203,4 +211,112 @@ test('invalid evidence, missing source and unverified lifecycle states cannot su
 test('matching evidence for distinct sources supports a reported positive total', () => {
   const rules = [verifiedRule, { ...verifiedRule, id: 'other-source', sourceIp: '192.0.2.11' }]
   assert.equal(getVerifiedSourceCount(snapshotWithMitigations(2, rules)), 2)
+})
+
+test('attack prediction KPI uses the complete class histogram only', () => {
+  const snapshot = {
+    ...createInitialSnapshot(),
+    predictionClassCounts: { benign: 277, syn_flood: 72, udp_flood: 0 },
+  }
+  assert.equal(getAttackPredictionCount(snapshot), 72)
+  assert.equal(getAttackPredictionCount(createInitialSnapshot()), null)
+})
+
+test('confirmed DROP rules include completed lifecycles and require a complete rule list', () => {
+  const rules = [
+    { ...verifiedRule, status: 'confirmed' as const, evidence: null },
+    { ...verifiedRule, id: 'cleaned', status: 'cleaned' as const },
+    { ...verifiedRule, id: 'requested', status: 'requested' as const },
+    { ...verifiedRule, id: 'not-drop', rule: 'ALLOW', status: 'dropping' as const },
+  ]
+  const snapshot = {
+    ...createInitialSnapshot(),
+    run: {
+      runId: 's1-run',
+      scenario: 'S1',
+      seed: 701,
+      status: 'complete',
+      policyMode: 'MITIGATE' as const,
+      revision: {},
+    },
+    dataMode: 'REPLAY' as const,
+    mitigations: rules,
+  }
+  assert.equal(getConfirmedDropRuleCount(snapshot), 2)
+  assert.equal(getConfirmedDropRuleCount({ ...snapshot, mitigationsComplete: false }), null)
+  assert.equal(getConfirmedDropRuleCount(createInitialSnapshot()), null)
+})
+
+test('historical dropped sources are distinct while cleaned sources are not currently blocked', () => {
+  const initial = createInitialSnapshot()
+  const rules = [
+    { ...verifiedRule, id: 'a-tcp', sourceIp: '10.0.0.10', ipProtocol: 6, status: 'cleaned' as const },
+    { ...verifiedRule, id: 'a-udp', sourceIp: '10.0.0.10', ipProtocol: 17, status: 'cleaned' as const },
+    { ...verifiedRule, id: 'b-tcp', sourceIp: '10.0.0.11', ipProtocol: 6, status: 'cleaned' as const },
+    { ...verifiedRule, id: 'b-udp', sourceIp: '10.0.0.11', ipProtocol: 17, status: 'cleaned' as const },
+    { ...verifiedRule, id: 'c-tcp', sourceIp: '10.0.0.12', ipProtocol: 6, status: 'cleaned' as const },
+    { ...verifiedRule, id: 'c-udp', sourceIp: '10.0.0.12', ipProtocol: 17, status: 'cleaned' as const },
+  ]
+  const snapshot = {
+    ...initial,
+    run: {
+      runId: 's8-run',
+      scenario: 'S8',
+      seed: 1101,
+      status: 'completed',
+      policyMode: 'MITIGATE' as const,
+      revision: {},
+    },
+    dataMode: 'REPLAY' as const,
+    mitigations: rules,
+    network: { ...initial.network, verifiedSources: 0 },
+  }
+
+  assert.equal(getConfirmedDropRuleCount(snapshot), 6)
+  assert.equal(getEverDroppedSourceCount(snapshot), 3)
+  assert.equal(getVerifiedSourceCount(snapshot), 0)
+  assert.equal(getEverDroppedSourceCount({
+    ...snapshot,
+    mitigations: [...rules, { ...verifiedRule, id: 'requested-only', status: 'requested' as const }],
+  }), 3)
+  assert.equal(getEverDroppedSourceCount({ ...snapshot, mitigationsComplete: false }), null)
+  assert.equal(getEverDroppedSourceCount(createInitialSnapshot()), null)
+})
+
+test('final DROP packet KPI sums terminal FlowRemoved counters by unique DPID and cookie', () => {
+  const removedRules = [
+    { ...verifiedRule, status: 'cleaned' as const, packetCount: 6_000, removalReason: 0 },
+    { ...verifiedRule, id: 'second-cookie', cookie: '0x-second', sourceIp: '192.0.2.11', status: 'removed' as const, packetCount: 6_795, removalReason: 0 },
+  ]
+  const snapshot = {
+    ...createInitialSnapshot(),
+    dataMode: 'REPLAY' as const,
+    run: {
+      runId: 's1-run',
+      scenario: 'S1',
+      seed: 701,
+      status: 'complete',
+      policyMode: 'MITIGATE' as const,
+      revision: {},
+    },
+    mitigations: removedRules,
+  }
+  assert.equal(getFinalDropPacketCount(snapshot), 12_795)
+  assert.equal(getFinalDropPacketCount({ ...snapshot, dataMode: 'LIVE' }), null)
+  assert.equal(getFinalDropPacketCount({
+    ...snapshot,
+    mitigations: [{ ...removedRules[0], removalReason: null }],
+  }), null)
+  assert.equal(getFinalDropPacketCount({
+    ...snapshot,
+    mitigations: [removedRules[0], { ...removedRules[1], dpid: 4 }],
+  }), 12_795)
+  assert.equal(getFinalDropPacketCount({
+    ...snapshot,
+    mitigations: [removedRules[0], { ...removedRules[1], cookie: removedRules[0].cookie }],
+  }), null)
+  assert.equal(getFinalDropPacketCount({
+    ...snapshot,
+    mitigations: [{ ...removedRules[0], cookie: null }],
+  }), null)
 })

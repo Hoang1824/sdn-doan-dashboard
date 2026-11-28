@@ -2,11 +2,12 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import { DashboardContext } from './dashboard-context'
 import { b8DashboardClient } from './b8-runtime'
 import { B8LiveFeed, type LiveFeedStatus } from './b8-live-feed'
-import { B8DashboardReducer, mapSnapshot } from './b8-read-model'
+import { B8DashboardReducer, mapHistoryEvent, mapSnapshot } from './b8-read-model'
 import { createInitialSnapshot } from './initial-state'
 import type {
   DashboardDataMode,
   DashboardSnapshot,
+  HistoryEventPage,
   RunFinalizationStatus,
   ServiceState,
 } from '../types/dashboard'
@@ -64,7 +65,6 @@ export function DashboardProvider({ children }: DashboardProviderProps) {
     let active = true
     void Promise.resolve().then(() => {
       if (!active) return null
-      setRunsLoading(true)
       return b8DashboardClient.listRunCatalog(controller.signal)
     }).then((result) => {
       if (!active || result === null) return
@@ -258,6 +258,25 @@ export function DashboardProvider({ children }: DashboardProviderProps) {
     setRunsRefreshKey((current) => current + 1)
   }, [])
 
+  const loadHistoryPage = useCallback(async (
+    runId: string,
+    after: string | null,
+    signal?: AbortSignal,
+  ): Promise<HistoryEventPage> => {
+    const page = await b8DashboardClient.getEvents(runId, after, 100, signal)
+    if (page.run_id !== runId || page.data_mode !== 'REPLAY') {
+      throw new Error('Backend event page does not match the requested REPLAY run.')
+    }
+    const browserReceivedAt = new Date().toISOString()
+    return {
+      events: page.events
+        .filter((event) => event.source_stream === 'ryu_events.jsonl' || event.kind === 'run.phase')
+        .map((event) => mapHistoryEvent(event, browserReceivedAt)),
+      nextCursor: page.next_cursor,
+      hasMore: page.has_more,
+    }
+  }, [])
+
   useEffect(() => () => {
     if (renderFrameRef.current !== null) window.cancelAnimationFrame(renderFrameRef.current)
   }, [])
@@ -276,6 +295,7 @@ export function DashboardProvider({ children }: DashboardProviderProps) {
     setRequestedDataMode,
     loadSnapshot,
     refreshRuns,
+    loadHistoryPage,
   }), [
     snapshot,
     runs,
@@ -289,6 +309,7 @@ export function DashboardProvider({ children }: DashboardProviderProps) {
     selectLiveRun,
     loadSnapshot,
     refreshRuns,
+    loadHistoryPage,
   ])
 
   return <DashboardContext.Provider value={value}>{children}</DashboardContext.Provider>

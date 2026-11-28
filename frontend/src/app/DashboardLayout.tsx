@@ -1,21 +1,14 @@
 import { lazy, Suspense, useEffect, useRef, useState } from 'react'
 import {
-  Activity,
   ArrowRight,
-  Bell,
-  BrainCircuit,
   ChevronRight,
   CircleHelp,
   Command,
-  Gauge,
-  History,
   LayoutDashboard,
-  LockKeyhole,
   Menu,
-  Network,
   Radio,
-  Server,
   Shield,
+  ShieldAlert,
   ShieldCheck,
   Unplug,
   X,
@@ -28,7 +21,15 @@ import {
 } from '../components/ui'
 import { formatTimestamp } from '../components/formatTimestamp'
 import { useDashboard } from '../data/useDashboard'
-import { formatMetric, getVerifiedSourceCount } from '../data/presentation'
+import { modelCandidateFromRevision } from '../data/b8-read-model'
+import {
+  formatMetric,
+  getAttackPredictionCount,
+  getConfirmedDropRuleCount,
+  getEverDroppedSourceCount,
+  getFinalDropPacketCount,
+  getVerifiedSourceCount,
+} from '../data/presentation'
 import { RunControl } from './RunControl'
 import { NetworkOverview } from '../features/network/NetworkOverview'
 import { AIDetection } from '../features/detection/AIDetection'
@@ -47,18 +48,21 @@ const TopologyPanel = lazy(() =>
 
 const navigation = [
   { id: 'overview', label: 'Tổng quan', icon: LayoutDashboard },
-  { id: 'network', label: 'Network Overview', icon: Activity },
-  { id: 'detection', label: 'AI Detection', icon: BrainCircuit },
-  { id: 'alerts', label: 'Attack Alerts', icon: Bell },
-  { id: 'topology', label: 'SDN Topology', icon: Network },
+  { id: 'detection', label: 'AI Detection', icon: ShieldCheck },
+  { id: 'alerts', label: 'DDoS Alerts', icon: ShieldAlert },
   { id: 'mitigation', label: 'Mitigation', icon: ShieldCheck },
-  { id: 'history', label: 'Attack History', icon: History },
-  { id: 'performance', label: 'Performance', icon: Gauge },
-  { id: 'system', label: 'System Status', icon: Server },
+  { id: 'network', label: 'DROP Counter', icon: Radio },
+  { id: 'history', label: 'Event Timeline', icon: Radio },
+  { id: 'evidence', label: 'Evidence & chi tiết', icon: CircleHelp },
 ]
 
 export function DashboardLayout() {
   const { snapshot } = useDashboard()
+  const attackPredictions = getAttackPredictionCount(snapshot)
+  const confirmedDropRules = getConfirmedDropRuleCount(snapshot)
+  const everDroppedSources = getEverDroppedSourceCount(snapshot)
+  const finalDropPackets = getFinalDropPacketCount(snapshot)
+  const activeBlockedSources = getVerifiedSourceCount(snapshot)
   const [menuOpen, setMenuOpen] = useState(false)
   const [active, setActive] = useState('overview')
   const sidebar = useRef<HTMLElement>(null)
@@ -290,12 +294,11 @@ export function DashboardLayout() {
         </header>
         <main className="dashboard-content" id="main-content" tabIndex={-1}>
           <RunControl />
-          <ReplaySummary snapshot={snapshot} />
           <div className="page-heading" id="overview">
             <div>
-              <p className="page-eyebrow"><span /> SECURITY OPERATIONS CENTER</p>
-              <h1>Tổng quan an ninh mạng</h1>
-              <p>Giám sát, phát hiện và theo dõi giảm thiểu DDoS trong mạng SDN.</p>
+              <p className="page-eyebrow"><span /> SENTINEL SDN · B8 READ-ONLY</p>
+              <h1>AI DDoS Detection & Mitigation</h1>
+              <p>Tổng quan prediction, cảnh báo, luật DROP và bằng chứng theo run đã chọn.</p>
             </div>
             <div className="updated-at">
               <span>BROWSER NHẬN DỮ LIỆU</span>
@@ -307,89 +310,111 @@ export function DashboardLayout() {
             <div className="connection-notice">
               <div className="notice-icon"><Unplug size={19} /></div>
               <div>
-                <strong>Dashboard đang chờ dữ liệu hệ thống</strong>
+                <strong>Dashboard đang chờ dữ liệu run B8</strong>
                 <p>
-                  Các chỉ số sẽ xuất hiện khi kết nối nguồn AI và SDN. Hiện chưa có dữ liệu giám sát.
+                  Chọn run và tải snapshot để xem prediction cùng mitigation đã ghi nhận.
                 </p>
               </div>
               <a href="#system">Xem trạng thái <ArrowRight size={15} /></a>
             </div>
           )}
-          <div className="metrics-grid" aria-label="Thống kê mạng tổng quan">
+          <div className="metrics-grid" aria-label="Tổng quan run B8">
             <MetricCard
-              icon={Activity}
-              label="Lưu lượng mạng"
-              value={formatMetric(snapshot.network.throughputMbps, 2)}
-              unit="Mbps"
-              note="Tổng lưu lượng đo được"
+              icon={Radio}
+              label="Tổng prediction"
+              value={formatMetric(snapshot.predictionCount)}
+              note="Prediction ID duy nhất trong run"
             />
             <MetricCard
-              icon={Network}
-              label="Tốc độ gói tin"
-              value={formatMetric(snapshot.network.packetsPerSecond)}
-              unit="pps"
-              note="Số gói tin mỗi giây"
-              accent="blue"
-            />
-            <MetricCard
-              icon={Bell}
-              label="Sự kiện cảnh báo / mitigation"
-              value={formatMetric(snapshot.alertEventCount)}
-              note="Sự kiện trong run; không phải số alert còn active"
+              icon={ShieldAlert}
+              label="Attack predictions"
+              value={formatMetric(attackPredictions)}
+              note="syn_flood + udp_flood; không phải accuracy"
               accent="amber"
             />
             <MetricCard
-              icon={LockKeyhole}
-              label="Nguồn active VERIFIED/DROPPING"
-              value={formatMetric(getVerifiedSourceCount(snapshot))}
-              note="Có bằng chứng controller / switch"
+              icon={ShieldCheck}
+              label="DROP rules đã xác nhận"
+              value={formatMetric(confirmedDropRules)}
+              note="CONFIRMED trở đi; không phải số source"
+              accent="blue"
+            />
+            <MetricCard
+              icon={Shield}
+              label="Nguồn từng được áp DROP"
+              value={formatMetric(everDroppedSources)}
+              note={`Đang bị chặn: ${formatMetric(activeBlockedSources)} IP · VERIFIED/DROPPING`}
               accent="violet"
+            />
+            <MetricCard
+              icon={ShieldCheck}
+              label="Final DROP packet counter"
+              value={formatMetric(finalDropPackets)}
+              note="REPLAY terminal; FlowRemoved đủ, cùng DPID"
             />
           </div>
           <div className="dashboard-grid analysis-grid">
-            <NetworkOverview
-              traffic={snapshot.network.traffic}
-              dropCounters={snapshot.network.dropCounterHistory}
-              dropCounterSampleCount={snapshot.network.dropCounterSampleCount}
-              dropCounterHistoryComplete={snapshot.network.dropCounterHistoryComplete}
-            />
             <AIDetection
               detection={snapshot.detection}
+              modelName={snapshot.detection?.modelName ?? modelCandidateFromRevision(snapshot.run?.revision)}
+              predictionCount={snapshot.predictionCount}
+              predictionClassCounts={snapshot.predictionClassCounts}
               policy={snapshot.detection?.sampleId
                 ? snapshot.policies.find((item) => item.sampleId === snapshot.detection?.sampleId) ?? null
                 : null}
             />
-          </div>
-          <AttackAlerts alerts={snapshot.alerts} />
-          <div className="section-divider">
-            <span>HẠ TẦNG & PHẢN ỨNG</span>
-            <div />
-          </div>
-          <div className="dashboard-grid operations-grid">
-            <Suspense
-              fallback={
-                <Panel id="topology" title="SDN Topology" kicker="HẠ TẦNG MẠNG">
-                  <EmptyState
-                    icon={Network}
-                    title="Đang tải khung topology"
-                    description="Đang chuẩn bị công cụ xem sơ đồ mạng."
-                  />
-                </Panel>
-              }
-            >
-              <TopologyPanel />
-            </Suspense>
-            <MitigationPanel rules={snapshot.mitigations} complete={snapshot.mitigationsComplete} />
-          </div>
-          <AttackHistory events={snapshot.history} dataMode={snapshot.dataMode} />
-          <div className="dashboard-grid health-grid">
-            <PerformancePanel performance={snapshot.performance} />
-            <SystemStatus
-              services={snapshot.services}
-              receivedAt={snapshot.receivedAt}
-              dataMode={snapshot.dataMode}
+            <AttackAlerts
+              alerts={snapshot.alerts}
+              rules={snapshot.mitigations}
+              alertEventCount={snapshot.alertEventCount}
+              historyComplete={snapshot.alertHistoryComplete}
             />
           </div>
+          <MitigationPanel rules={snapshot.mitigations} complete={snapshot.mitigationsComplete} />
+          <NetworkOverview
+            dropCounters={snapshot.network.dropCounterHistory}
+            dropCounterSampleCount={snapshot.network.dropCounterSampleCount}
+            dropCounterHistoryComplete={snapshot.network.dropCounterHistoryComplete}
+          />
+          <AttackHistory
+            key={`${snapshot.run?.runId ?? 'none'}:${snapshot.dataMode ?? 'none'}`}
+            events={snapshot.history}
+            dataMode={snapshot.dataMode}
+            runId={snapshot.run?.runId ?? null}
+          />
+          <details className="dashboard-details" id="evidence">
+            <summary>Evidence & chi tiết kỹ thuật</summary>
+            <div className="evidence-grid">
+              <ReplaySummary snapshot={snapshot} />
+              <PerformancePanel performance={snapshot.performance} />
+              {(snapshot.performance.mitigationMs === null
+                || snapshot.performance.mitigationSampleCount === null
+                || snapshot.performance.mitigationSampleCount === 0) && (
+                <p className="measurement-note">
+                  Chưa có request→counter đủ timestamp trong run này. Detection latency cần packet-first-seen;
+                  RTT cần cặp request/response. Hai phép đo đó chưa có nguồn trong contract hiện tại.
+                </p>
+              )}
+              <SystemStatus
+                services={snapshot.services}
+                receivedAt={snapshot.receivedAt}
+                dataMode={snapshot.dataMode}
+              />
+              <Suspense
+                fallback={
+                  <Panel id="topology" title="SDN Topology" kicker="HẠ TẦNG MẠNG">
+                    <EmptyState
+                      icon={Shield}
+                      title="Đang tải khung topology"
+                      description="Đang chuẩn bị công cụ xem sơ đồ mạng."
+                    />
+                  </Panel>
+                }
+              >
+                <TopologyPanel />
+              </Suspense>
+            </div>
+          </details>
           <footer className="dashboard-footer">
             <span>
               <Shield size={13} /> SENTINEL SDN <span className="footer-separator">/</span> AI-powered network security

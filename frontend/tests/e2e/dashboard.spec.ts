@@ -314,10 +314,19 @@ test('run selection loads a final REPLAY snapshot without starting a live socket
   await expect(page.locator('#history')).toContainText('Đã quét hết')
   await expect(page.locator('#history')).toContainText('v2_prediction: syn_flood')
   await expect(page.locator('#history tbody tr').filter({ hasText: 'v2_prediction: syn_flood' })).toHaveCount(1)
+  const requestsAfterAiSearch = eventPageRequests.length
   await page.getByRole('button', { name: 'DROP Requested / Confirmed' }).click()
   await page.getByRole('button', { name: 'Tìm trên toàn bộ REPLAY' }).click()
   await expect(page.locator('#history')).toContainText('b8_mitigation_requested')
   await expect(page.locator('#history')).toContainText('b8_mitigation_confirmed')
+  const requestsAfterDropSearch = eventPageRequests.length
+  await page.getByRole('button', { name: 'AI Attack Detection' }).click()
+  await expect(page.locator('#history')).toContainText('v2_prediction: syn_flood')
+  expect(eventPageRequests).toHaveLength(requestsAfterDropSearch)
+  await page.getByRole('button', { name: 'DROP Requested / Confirmed' }).click()
+  await expect(page.locator('#history')).toContainText('b8_mitigation_confirmed')
+  expect(eventPageRequests).toHaveLength(requestsAfterDropSearch)
+  expect(requestsAfterDropSearch).toBeGreaterThan(requestsAfterAiSearch)
   await page.getByRole('button', { name: 'Verified DROP Counter' }).click()
   await page.getByRole('button', { name: 'Tìm trên toàn bộ REPLAY' }).click()
   await expect(page.locator('#history')).toContainText('b8_drop_counter')
@@ -476,6 +485,116 @@ test('switching S1/S7/S8 clears history and finds S7 DROP confirmation beyond th
   await expect(page.locator('#history')).not.toContainText('b8_mitigation_confirmed')
   await expect(page.locator('#history')).not.toContainText('replay-s1_snapshot_marker')
   await expect(page.getByLabel('Chế độ dữ liệu')).toHaveValue('REPLAY')
+})
+
+test('out-of-order REPLAY filter searches keep separate cached results', async ({ page }) => {
+  const runId = 'race-s8-run'
+  const makeEvent = (eventId: string, kind: string, rawEvent: string, payload: Record<string, unknown>) => ({
+    schema_version: 'b8.dashboard.v1',
+    run_id: runId,
+    event_id: eventId,
+    cursor: `cursor-${eventId}`,
+    kind,
+    raw_event: rawEvent,
+    source_stream: 'ryu_events.jsonl',
+    source_timestamp: 1795701900,
+    backend_received_at: '2026-11-27T15:59:59Z',
+    data_mode: 'REPLAY',
+    policy_mode: 'MITIGATE',
+    run_revision: {},
+    keys: { sample_id: null, cookie: '0x001' },
+    payload,
+  })
+  const benign = makeEvent('race-benign', 'ai.prediction', 'v2_prediction', { prediction: 'benign' })
+  const attack = makeEvent('race-attack', 'ai.prediction', 'v2_prediction', { prediction: 'udp_flood' })
+  const drop = makeEvent('race-drop', 'mitigation.confirmed', 'b8_mitigation_confirmed', {
+    mitigation_action: 'DROP',
+    src_ip: '10.0.0.8',
+  })
+  await page.route('**/api/runs', route => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({
+      runs: [{
+        run_id: runId,
+        manifest: { scenario: 8, seed_reference: 1101, mode: 'MITIGATE', status: 'completed' },
+      }],
+    }),
+  }))
+  await page.route(`**/api/runs/${runId}/snapshot*`, route => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({
+      run_id: runId,
+      data_mode: 'REPLAY',
+      policy_mode: 'MITIGATE',
+      run: {
+        scenario: 8,
+        seed: 1101,
+        status: 'completed',
+        policy_mode: 'MITIGATE',
+        revision: {},
+      },
+      as_of_cursor: 'race-snapshot',
+      snapshot_received_at: '2026-11-27T16:00:00Z',
+      state: {
+        prediction_count: 1,
+        latest_prediction: benign,
+        latest_policies: [],
+        rules: [],
+        verified_source_count: 0,
+        observations: [],
+        prediction_class_counts: { benign: 1, syn_flood: 0, udp_flood: 0 },
+        alert_event_count: 0,
+        alert_events: [],
+        recent_events: [benign],
+        drop_counter_sample_count: 0,
+        drop_counter_history: [],
+        mitigation_observation_ms: null,
+        mitigation_observation_count: 0,
+      },
+    }),
+  }))
+
+  const pageResponses: string[] = []
+  await page.route(`**/api/runs/${runId}/events*`, async route => {
+    const requestIndex = pageResponses.length
+    const url = new URL(route.request().url())
+    pageResponses.push(url.href)
+    if (requestIndex === 1) await new Promise((resolve) => setTimeout(resolve, 1_000))
+    const events = requestIndex === 1 ? [attack] : requestIndex === 3 ? [drop] : [benign]
+    const hasMore = requestIndex === 0 || requestIndex === 2
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        run_id: runId,
+        data_mode: 'REPLAY',
+        events,
+        next_cursor: hasMore ? 'race-next' : `race-end-${requestIndex}`,
+        has_more: hasMore,
+      }),
+    })
+  })
+
+  await page.goto('/')
+  await page.getByLabel('Chọn run', { exact: true }).selectOption(runId)
+  await page.getByRole('button', { name: 'Tải snapshot lịch sử' }).click()
+  await page.getByRole('button', { name: 'AI Attack Detection' }).click()
+  await page.getByRole('button', { name: 'Tìm trên toàn bộ REPLAY' }).click()
+  await expect.poll(() => pageResponses.length).toBe(2)
+  await expect(page.getByRole('status')).toContainText('Đã quét 1 trang')
+
+  await page.getByRole('button', { name: 'DROP Requested / Confirmed' }).click()
+  await page.getByRole('button', { name: 'Tìm trên toàn bộ REPLAY' }).click()
+  await expect(page.locator('#history')).toContainText('b8_mitigation_confirmed')
+  await expect.poll(() => pageResponses.length).toBe(4)
+
+  await page.getByRole('button', { name: 'AI Attack Detection' }).click()
+  await expect(page.locator('#history')).toContainText('v2_prediction: udp_flood')
+  await page.getByRole('button', { name: 'DROP Requested / Confirmed' }).click()
+  await expect(page.locator('#history')).toContainText('b8_mitigation_confirmed')
+  expect(pageResponses).toHaveLength(4)
 })
 
 test('run selector stays stable through polling and loads only the manually selected snapshot', async ({ page }) => {

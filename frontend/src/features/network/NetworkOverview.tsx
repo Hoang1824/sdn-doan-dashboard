@@ -1,31 +1,19 @@
-import { lazy, Suspense, useMemo, useState } from 'react'
-import { Activity, ArrowDownLeft, ArrowUpRight, ChartNoAxesCombined } from 'lucide-react'
+import { lazy, Suspense, useMemo } from 'react'
+import { ChartNoAxesCombined } from 'lucide-react'
 import { EmptyState, Panel } from '../../components/ui'
-import type { DropCounterPoint, TrafficPoint } from '../../types/dashboard'
+import type { DropCounterPoint } from '../../types/dashboard'
 
-const TrafficChart = lazy(() => import('./TrafficChart'))
 const DropCounterChart = lazy(() => import('./DropCounterChart'))
-const windows = [{ label: '5 phút', minutes: 5 }, { label: '15 phút', minutes: 15 }, { label: '1 giờ', minutes: 60 }]
 
 export function NetworkOverview({
-  traffic,
   dropCounters,
   dropCounterSampleCount,
   dropCounterHistoryComplete,
 }: {
-  traffic: readonly TrafficPoint[]
   dropCounters: readonly DropCounterPoint[]
   dropCounterSampleCount: number | null
   dropCounterHistoryComplete: boolean
 }) {
-  const [minutes, setMinutes] = useState(15)
-  const points = useMemo(() => {
-    const valid = traffic.filter(point => Number.isFinite(Date.parse(point.timestamp)) && Number.isFinite(point.ingressMbps) && Number.isFinite(point.egressMbps) && point.ingressMbps >= 0 && point.egressMbps >= 0)
-      .sort((a, b) => Date.parse(a.timestamp) - Date.parse(b.timestamp))
-    const latest = valid.at(-1)
-    if (!latest) return []
-    return valid.filter(point => Date.parse(point.timestamp) >= Date.parse(latest.timestamp) - minutes * 60_000)
-  }, [traffic, minutes])
   const latestDropCounters = useMemo(() => {
     const latest = new Map<string, DropCounterPoint>()
     for (const point of dropCounters) {
@@ -40,40 +28,58 @@ export function NetworkOverview({
       .slice(0, 6)
   }, [dropCounters])
 
-  return <Panel id="network" className="network-panel" title="Network Overview" kicker="LƯU LƯỢNG MẠNG" subtitle="Theo dõi lưu lượng vào và ra trong mạng SDN" action={
-    <div className="segmented-control" role="group" aria-label="Khoảng thời gian biểu đồ">
-      {windows.map(window => <button key={window.minutes} aria-pressed={minutes === window.minutes} onClick={() => setMinutes(window.minutes)}>{window.label}</button>)}
-    </div>
-  }>
-    <div className="chart-meta"><span><Activity size={13} aria-hidden="true" /> Băng thông <span className="mono">/ Mbps</span></span><div className="chart-legend"><span><i className="legend-dot ingress" />Inbound</span><span><i className="legend-dot egress" />Outbound</span></div></div>
-    <div className={`traffic-chart ${points.length ? '' : 'traffic-chart-empty'}`}>
-      {points.length > 0 ? <Suspense fallback={<div role="status">Đang tải biểu đồ…</div>}>
-        <TrafficChart points={points} />
-      </Suspense> : <EmptyState icon={ChartNoAxesCombined} title="Chưa có phép đo băng thông" description="Backend chưa cung cấp nguồn Mbps inbound/outbound đã được xác định; DROP counters không thay thế network throughput." />}
-    </div>
-    <div className="panel-bottom chart-bottom"><span><ArrowDownLeft size={14} /> Inbound</span><span><ArrowUpRight size={14} /> Outbound</span><small>{points.length ? `${points.length} mẫu · Khoảng thời gian tính từ mẫu mới nhất` : 'Mbps unavailable'} · UTC+7</small></div>
-    <section className="drop-counter-section" aria-label="DROP packet counters">
-      <div className="drop-counter-heading">
-        <div>
-          <h3>DROP packet counter lũy kế theo cookie</h3>
-          <p>Chỉ counter `verified_flow_stats`; mỗi flow là một chuỗi riêng, không cộng thành network PPS.</p>
-        </div>
-        <small>{dropCounterSampleCount === null ? 'Số mẫu chưa có' : `${dropCounterSampleCount} mẫu`}
-          {!dropCounterHistoryComplete && dropCounters.length > 0 ? ' · đang hiển thị tối đa 500 mẫu gần nhất' : ''}
-        </small>
-      </div>
+  return (
+    <Panel
+      id="network"
+      className="network-panel drop-counter-panel"
+      title="DROP Counter Timeline"
+      kicker="BẰNG CHỨNG FLOW STATS"
+      subtitle="Packet counter lũy kế theo từng DPID/cookie; không phải tổng traffic PPS."
+      action={
+        <span className="drop-counter-sample-count">
+          {dropCounterSampleCount === null ? 'Chưa có số mẫu' : `${dropCounterSampleCount} mẫu verified`}
+          {!dropCounterHistoryComplete && dropCounters.length > 0
+            ? ' · đang hiển thị tối đa 500 mẫu gần nhất'
+            : ''}
+        </span>
+      }
+    >
       <div className={`drop-counter-chart ${dropCounters.length ? '' : 'drop-counter-chart-empty'}`}>
-        {dropCounters.length > 0 ? <Suspense fallback={<div role="status">Đang tải biểu đồ…</div>}>
-          <DropCounterChart points={dropCounters} />
-        </Suspense> : <EmptyState icon={ChartNoAxesCombined} title="Chưa có counter DROP hợp lệ" description="Biểu đồ cần counter lũy kế theo cookie có timestamp và bằng chứng controller/switch." />}
+        {dropCounters.length > 0 ? (
+          <Suspense fallback={<div role="status">Đang tải biểu đồ…</div>}>
+            <DropCounterChart points={dropCounters} />
+          </Suspense>
+        ) : (
+          <EmptyState
+            icon={ChartNoAxesCombined}
+            title="Chưa có counter DROP hợp lệ"
+            description="Cần b8_drop_counter từ verified_flow_stats, có cookie, DPID và timestamp."
+          />
+        )}
       </div>
-      {latestDropCounters.length > 0 && <ul className="drop-counter-latest" aria-label="Counter DROP mới nhất theo cookie">
-        {latestDropCounters.map((point) => <li key={`${point.dpid}:${point.cookie}`}>
-          <span className="mono">{point.cookie} · DPID {point.dpid}</span>
-          <span>{point.packetCount.toLocaleString('en-US')} packets lũy kế</span>
-          <small>{point.counterReset ? 'reset; delta không khả dụng' : point.delta === null ? 'delta chưa có mẫu trước' : `Δ ${point.delta.toLocaleString('en-US')} packets`}</small>
-        </li>)}
-      </ul>}
-    </section>
-  </Panel>
+      {latestDropCounters.length > 0 && (
+        <ul className="drop-counter-latest" aria-label="Counter DROP mới nhất theo cookie">
+          {latestDropCounters.map((point) => (
+            <li key={`${point.dpid}:${point.cookie}`}>
+              <span className="mono">{point.cookie} · DPID {point.dpid}</span>
+              <span>{point.packetCount.toLocaleString('en-US')} packets lũy kế</span>
+              <small>
+                {point.counterReset
+                  ? 'reset; delta không khả dụng'
+                  : point.delta === null
+                    ? 'delta chưa có mẫu trước'
+                    : `Δ ${point.delta.toLocaleString('en-US')} packets`}
+              </small>
+            </li>
+          ))}
+        </ul>
+      )}
+      <div className="panel-bottom">
+        <span>
+          packet_count là counter lũy kế; delta là mức tăng giữa hai mẫu hợp lệ.
+          delta = 0 không có nghĩa cả run không DROP gói nào. Không cộng lặp mẫu hay coi đây là PPS/băng thông toàn mạng.
+        </span>
+      </div>
+    </Panel>
+  )
 }

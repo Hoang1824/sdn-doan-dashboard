@@ -1,7 +1,10 @@
+import { useState } from 'react'
 import { RefreshCw, SquareArrowOutUpRight } from 'lucide-react'
+import { StatusBadge } from '../components/ui'
 import { formatTimestamp } from '../components/formatTimestamp'
 import { modelCandidateFromRevision } from '../data/b8-read-model'
 import { useDashboard } from '../data/useDashboard'
+import type { DashboardRunOption } from '../types/dashboard'
 
 function displayRevision(
   revision: Readonly<Record<string, unknown>>,
@@ -23,6 +26,7 @@ function displayRevision(
 }
 
 export function RunControl() {
+  const [focusedRuns, setFocusedRuns] = useState<readonly DashboardRunOption[] | null>(null)
   const {
     snapshot,
     runs,
@@ -40,7 +44,17 @@ export function RunControl() {
   } = useDashboard()
   const run = snapshot.run
   const selectedRun = runs.find((item) => item.runId === selectedRunId)
+  const displayedRuns = focusedRuns ?? runs
   const liveStatus = snapshot.runLiveStatus ?? selectedRun?.live ?? null
+  const connectionLabel = requestedDataMode === 'REPLAY'
+    ? 'WebSocket không dùng (REPLAY)'
+    : snapshot.services.websocket.status === 'connected'
+      ? 'WebSocket kết nối'
+      : snapshot.services.websocket.status === 'error'
+        ? 'WebSocket lỗi'
+        : snapshot.services.websocket.status === 'disconnected'
+          ? 'WebSocket đang reconnect'
+          : 'WebSocket đang kết nối'
   const modeLabel = snapshot.dataMode === 'LIVE'
     ? 'LIVE · theo dõi bản ghi mới'
     : snapshot.dataMode === 'REPLAY'
@@ -52,7 +66,7 @@ export function RunControl() {
       <div className="run-control-heading">
         <div>
           <p className="run-control-kicker">B8 READ-ONLY DATA SOURCE</p>
-          <h2>Run & snapshot</h2>
+          <h2>Run control</h2>
         </div>
         <button
           type="button"
@@ -71,12 +85,14 @@ export function RunControl() {
             aria-label="Chọn run"
             value={selectedRunId}
             onChange={(event) => setSelectedRunId(event.target.value)}
-            disabled={runsLoading || runs.length === 0}
+            onFocus={() => setFocusedRuns(runs)}
+            onBlur={() => setFocusedRuns(null)}
+            disabled={runs.length === 0}
           >
             <option value="">
               {runsLoading ? 'Đang tải danh sách run…' : runs.length ? 'Chọn run B8' : 'API chưa trả run nào'}
             </option>
-            {runs.map((item) => (
+            {displayedRuns.map((item) => (
               <option key={item.runId} value={item.runId}>
                 {[item.runId, item.scenario, item.seed !== null ? `seed ${item.seed}` : null]
                   .filter(Boolean)
@@ -113,6 +129,20 @@ export function RunControl() {
               ? 'Tải snapshot & kết nối'
               : 'Tải snapshot lịch sử'}
         </button>
+      </div>
+      <div className="run-control-summary" aria-label="Thông tin run đang chọn">
+        <span className="mono">{selectedRunId || 'Chưa chọn run'}</span>
+        <StatusBadge tone={selectedRun?.scenario ? 'cyan' : 'muted'}>
+          {selectedRun?.scenario ?? 'Scenario —'}
+          {selectedRun?.seed !== null && selectedRun?.seed !== undefined ? ` · seed ${selectedRun.seed}` : ''}
+        </StatusBadge>
+        <StatusBadge tone="muted">{selectedRun?.policyMode ?? 'Policy —'}</StatusBadge>
+        <StatusBadge tone={(snapshot.dataMode ?? requestedDataMode) === 'LIVE' ? 'green' : 'cyan'}>
+          {snapshot.dataMode ?? requestedDataMode}
+        </StatusBadge>
+        <StatusBadge tone={snapshot.services.websocket.status === 'connected' ? 'green' : 'muted'}>
+          {connectionLabel}
+        </StatusBadge>
       </div>
       <p className="run-control-note">
         LIVE chỉ theo dõi JSONL được backend cho phép; không khẳng định traffic hay cuộc tấn công đang chạy.
@@ -169,7 +199,9 @@ export function RunControl() {
         <p className="run-control-error" role="status">{selectedRun.metadataError}</p>
       )}
       {run && (
-        <dl className="run-metadata">
+        <details className="run-evidence-details">
+          <summary>Metadata, revision và snapshot evidence</summary>
+          <dl className="run-metadata">
           <div><dt>run_id</dt><dd className="mono">{run.runId}</dd></div>
           <div><dt>Scenario / seed</dt><dd>{run.scenario ?? '—'} / {run.seed ?? '—'}</dd></div>
           <div><dt>Policy mode</dt><dd>{run.policyMode ?? '—'}</dd></div>
@@ -208,7 +240,8 @@ export function RunControl() {
               )}
             </dd>
           </div>
-        </dl>
+          </dl>
+        </details>
       )}
       {snapshot.dataMode === 'LIVE' && (
         <p className="run-control-live-note" role="status">
