@@ -8,7 +8,7 @@ import {
   type B8WebSocketLike,
 } from '../frontend/src/data/b8-api.ts'
 import { B8LiveFeed } from '../frontend/src/data/b8-live-feed.ts'
-import { B8DashboardReducer, mapSnapshot } from '../frontend/src/data/b8-read-model.ts'
+import { B8DashboardReducer, mapHistoryEvent, mapSnapshot } from '../frontend/src/data/b8-read-model.ts'
 
 const browserAt = '2026-11-27T16:00:00.000Z'
 
@@ -163,6 +163,96 @@ test('REST client parses the run catalog and maps manifest seed_reference', asyn
   assert.equal(catalog.runs[0].live?.eligible, true)
   assert.equal(catalog.liveDiscovery?.status, 'single')
   assert.deepEqual(catalog.liveDiscovery?.candidateRunIds, ['run-test'])
+})
+
+test('REPLAY event pages use the existing cursor endpoint from the initial cursor', async () => {
+  const requests: string[] = []
+  const historyEvent = {
+    ...event('page-event', 'ai.prediction', { prediction: 'syn_flood', src_ip: '10.0.0.10' }),
+    data_mode: 'REPLAY' as const,
+  }
+  const client = new B8DashboardClient({
+    apiBaseUrl: 'http://127.0.0.1:8003',
+    fetcher: async (input) => {
+      requests.push(String(input))
+      const after = new URL(String(input)).searchParams.get('after')
+      return response({
+        run_id: 'run-test',
+        data_mode: 'REPLAY',
+        events: after ? [] : [historyEvent],
+        next_cursor: after ? 'end-cursor' : 'page-2-cursor',
+        has_more: after === null,
+      })
+    },
+  })
+
+  const first = await client.getEvents('run-test', null, 100)
+  const next = await client.getEvents('run-test', first.next_cursor, 100)
+
+  assert.equal(first.events[0].event_id, 'page-event')
+  assert.equal(first.has_more, true)
+  assert.equal(next.events.length, 0)
+  assert.equal(next.has_more, false)
+  assert.equal(new URL(requests[0]).pathname, '/api/runs/run-test/events')
+  assert.equal(new URL(requests[0]).searchParams.get('after'), null)
+  assert.equal(new URL(requests[0]).searchParams.get('limit'), '100')
+  assert.equal(new URL(requests[1]).searchParams.get('after'), 'page-2-cursor')
+  assert.equal(new URL(requests[1]).searchParams.get('data_mode'), 'REPLAY')
+})
+
+test('S8 history categories match normalized kinds, raw events, and prediction labels', () => {
+  const category = (
+    kind: string,
+    rawEvent: string,
+    payload: Record<string, unknown> = {},
+  ) => mapHistoryEvent({
+    ...event(`category-${kind}-${rawEvent}`, kind, payload),
+    raw_event: rawEvent,
+  }, browserAt).timelineCategory
+
+  assert.equal(category('ai.prediction', 'v2_prediction', { prediction: 'syn_flood' }), 'ai_attack')
+  assert.equal(category('ai.prediction', 'v2_prediction', { label: 'udp_flood' }), 'ai_attack')
+  assert.equal(category('other', 'AI_PHAT_HIEN'), 'ai_attack')
+  assert.equal(category('ai.prediction', 'v2_prediction', { prediction: 'benign' }), 'other')
+  assert.equal(category('ai.prediction', 'AI_PHAT_HIEN', { prediction: 'benign' }), 'other')
+
+  assert.equal(category('policy.decision', 'policy.decision'), 'ryu_policy')
+  assert.equal(category('other', 'RYU_DANH_GIA'), 'ryu_policy')
+  assert.equal(category('other', 'b8_live_policy_decision'), 'ryu_policy')
+
+  assert.equal(category('mitigation.requested', 'mitigation.requested'), 'drop_control')
+  assert.equal(category('mitigation.confirmed', 'mitigation.confirmed'), 'drop_control')
+  assert.equal(category('other', 'RYU_YEU_CAU'), 'drop_control')
+  assert.equal(category('other', 'OVS_DA_AP_LUAT'), 'drop_control')
+  assert.equal(category('other', 'b8_mitigation_requested'), 'drop_control')
+  assert.equal(category('other', 'b8_mitigation_confirmed'), 'drop_control')
+
+  const verifiedCounter = {
+    mitigation_action: 'DROP',
+    counter_source: 'verified_flow_stats',
+    packet_count: 21,
+    cookie: '0x1234',
+    dpid: 3,
+  }
+  assert.equal(category('mitigation.counter', 'b8_drop_counter', verifiedCounter), 'verified_counter')
+  assert.equal(category('other', 'OVS_DA_LOAI_GOI', verifiedCounter), 'verified_counter')
+  assert.equal(category('other', 'b8_drop_counter', verifiedCounter), 'verified_counter')
+  assert.equal(category('mitigation.counter', 'b8_drop_counter', {
+    ...verifiedCounter,
+    counter_source: 'unverified',
+  }), 'other')
+  assert.equal(category('mitigation.counter', 'b8_drop_counter', {
+    ...verifiedCounter,
+    mitigation_action: 'ALLOW',
+  }), 'other')
+  assert.equal(category('other', 'b8_drop_counter'), 'other')
+
+  assert.equal(category('mitigation.removed', 'mitigation.removed'), 'removed_cleaned')
+  assert.equal(category('mitigation.cleaned', 'mitigation.cleaned'), 'removed_cleaned')
+  assert.equal(category('other', 'OVS_GO_LUAT'), 'removed_cleaned')
+  assert.equal(category('other', 'OVS_DON_LUAT'), 'removed_cleaned')
+  assert.equal(category('other', 'b8_mitigation_flow_removed'), 'removed_cleaned')
+  assert.equal(category('other', 'b8_mitigation_cleaned'), 'removed_cleaned')
 })
 
 test('snapshot maps B8 metadata and leaves unavailable traffic/latency metrics null', () => {

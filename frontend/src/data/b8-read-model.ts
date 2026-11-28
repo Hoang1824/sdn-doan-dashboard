@@ -214,19 +214,89 @@ function historyKind(kind: string): HistoryEvent['kind'] {
   return 'system'
 }
 
+function historyCategory(event: B8NormalizedEvent): HistoryEvent['timelineCategory'] {
+  const kind = event.kind.trim().toLowerCase()
+  const rawEvent = event.raw_event.trim().toLowerCase()
+  const predictionLabels = [eventText(event, 'prediction'), eventText(event, 'label')]
+    .map((value) => value?.trim().toLowerCase())
+  const action = eventText(event, 'mitigation_action')?.trim().toUpperCase()
+  const counterSource = eventText(event, 'counter_source')?.trim().toLowerCase()
+  const packetCount = numberValue(event.payload.packet_count)
+  const cookie = event.keys.cookie ?? eventText(event, 'cookie')
+  const dpid = event.payload.dpid
+  const hasVerifiedDropCounter = action === 'DROP'
+    && counterSource === 'verified_flow_stats'
+    && packetCount !== null
+    && Number.isSafeInteger(packetCount)
+    && packetCount >= 0
+    && cookie !== null
+    && cookie.trim() !== ''
+    && (
+      (typeof dpid === 'number' && Number.isSafeInteger(dpid) && dpid >= 0)
+      || (typeof dpid === 'string' && dpid.trim() !== '')
+    )
+
+  if (kind === 'ai.prediction') {
+    return predictionLabels.some((label) => label === 'syn_flood' || label === 'udp_flood')
+      ? 'ai_attack'
+      : 'other'
+  }
+  if (kind === 'policy.decision') return 'ryu_policy'
+  if (kind === 'mitigation.requested' || kind === 'mitigation.confirmed') return 'drop_control'
+  if (kind === 'mitigation.counter') return hasVerifiedDropCounter ? 'verified_counter' : 'other'
+  if (kind === 'mitigation.removed' || kind === 'mitigation.cleaned') return 'removed_cleaned'
+
+  if (rawEvent === 'ai_phat_hien') return 'ai_attack'
+  if (rawEvent === 'ryu_danh_gia' || rawEvent === 'b8_live_policy_decision') return 'ryu_policy'
+  if (
+    rawEvent === 'ryu_yeu_cau'
+    || rawEvent === 'ovs_da_ap_luat'
+    || rawEvent === 'b8_mitigation_requested'
+    || rawEvent === 'b8_mitigation_confirmed'
+  ) return 'drop_control'
+  if (
+    (rawEvent === 'ovs_da_loai_goi' || rawEvent === 'b8_drop_counter')
+    && hasVerifiedDropCounter
+  ) return 'verified_counter'
+  if (
+    rawEvent === 'ovs_go_luat'
+    || rawEvent === 'ovs_don_luat'
+    || rawEvent === 'b8_mitigation_flow_removed'
+    || rawEvent === 'b8_mitigation_cleaned'
+  ) return 'removed_cleaned'
+  return 'other'
+}
+
 function describeEvent(event: B8NormalizedEvent): string {
   const prediction = eventText(event, 'prediction')
   const decision = eventText(event, 'decision')
   const action = eventText(event, 'mitigation_action')
-  const detail = prediction ?? decision ?? action
-  return detail ? `${event.raw_event}: ${detail}` : event.raw_event
+  const packetCount = numberValue(event.payload.packet_count)
+  const phase = eventText(event, 'phase')
+  const status = eventText(event, 'status')
+  const details = [
+    prediction,
+    decision,
+    action,
+    packetCount === null ? null : `${packetCount.toLocaleString('en-US')} packets`,
+    phase,
+    status,
+  ].filter((value): value is string => value !== null)
+  return details.length > 0 ? `${event.raw_event}: ${details.join(' · ')}` : event.raw_event
 }
 
-function mapHistory(event: B8NormalizedEvent, browserAt: string): HistoryEvent {
+export function mapHistoryEvent(event: B8NormalizedEvent, browserAt: string): HistoryEvent {
   return {
     id: event.event_id,
     timestamp: sourceTimestamp(event.source_timestamp) ?? '',
     sourceIp: eventText(event, 'src_ip'),
+    rawEvent: event.raw_event,
+    sampleId: event.keys.sample_id ?? eventText(event, 'sample_id'),
+    cookie: event.keys.cookie ?? eventText(event, 'cookie'),
+    dpid: typeof event.payload.dpid === 'number' || typeof event.payload.dpid === 'string'
+      ? event.payload.dpid
+      : null,
+    timelineCategory: historyCategory(event),
     kind: historyKind(event.kind),
     description: describeEvent(event),
     severity: 'info',
@@ -297,6 +367,17 @@ function mapRuleHistory(rule: B8RuleProjection, browserAt: string): HistoryEvent
     id: rule.last_event_id,
     timestamp: timestamp ?? '',
     sourceIp: rule.src_ip,
+    rawEvent: null,
+    sampleId: rule.sample_id,
+    cookie: rule.cookie,
+    dpid: rule.dpid,
+    timelineCategory: ['removed', 'removed_idle', 'cleaned'].includes(statusFromWire(rule.status))
+      ? 'removed_cleaned'
+      : ['verified', 'dropping'].includes(statusFromWire(rule.status))
+        ? 'verified_counter'
+        : ['requested', 'confirmed'].includes(statusFromWire(rule.status))
+          ? 'drop_control'
+          : 'other',
     kind: 'mitigation',
     description: `${action} ${rule.status.toLowerCase()} · cookie ${rule.cookie}`,
     severity: 'info',
@@ -372,11 +453,11 @@ export function mapSnapshot(
       .slice(-MAX_ALERT_EVENTS)
     : fallbackAlert ? [fallbackAlert] : []
   const histories = wire.state.recent_events
-    ? wire.state.recent_events.map((event) => mapHistory(event, browserReceivedAt))
+    ? wire.state.recent_events.map((event) => mapHistoryEvent(event, browserReceivedAt))
     : [
-      ...(latest ? [mapHistory(latest, browserReceivedAt)] : []),
-      ...wire.state.latest_policies.map((event) => mapHistory(event, browserReceivedAt)),
-      ...wire.state.observations.map((event) => mapHistory(event, browserReceivedAt)),
+      ...(latest ? [mapHistoryEvent(latest, browserReceivedAt)] : []),
+      ...wire.state.latest_policies.map((event) => mapHistoryEvent(event, browserReceivedAt)),
+      ...wire.state.observations.map((event) => mapHistoryEvent(event, browserReceivedAt)),
       ...rules
         .map((rule) => mapRuleHistory(rule, browserReceivedAt))
         .filter((event): event is HistoryEvent => event !== null),
@@ -632,7 +713,7 @@ function addHistory(
   event: B8NormalizedEvent,
   browserAt: string,
 ): HistoryEvent[] {
-  return [...history, mapHistory(event, browserAt)].slice(-MAX_HISTORY_EVENTS)
+  return [...history, mapHistoryEvent(event, browserAt)].slice(-MAX_HISTORY_EVENTS)
 }
 
 function hasAlert(alerts: readonly AlertEvent[], alert: AlertEvent): boolean {
