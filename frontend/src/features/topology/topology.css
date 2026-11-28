@@ -1,0 +1,248 @@
+.topology-panel {
+  min-width: 0;
+  overflow: hidden;
+}
+
+.topology-panel-expanded {
+  grid-column: 1 / -1;
+}
+
+.topology-kicker {
+  margin: 0 0 8px;
+  color: #8493a9;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 1.5px;
+}
+
+.topology-expand {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 32px;
+  height: 32px;
+  border: 1px solid #293649;
+  border-radius: 7px;
+  color: #a4b2c6;
+  background: #151e2b;
+  cursor: pointer;
+}
+
+.topology-expand:hover,
+.topology-detail-header button:hover {
+  color: #43d5c7;
+  border-color: #43d5c7;
+}
+
+.topology-expand:focus-visible,
+.topology-detail-header button:focus-visible,
+.topology-panel .react-flow__controls-button:focus-visible {
+  outline: 2px solid #43d5c7;
+  outline-offset: 3px;
+}
+
+.topology-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 20px;
+  padding: 0 22px 16px;
+  color: #9aa9bc;
+  font-size: 11px;
+}
+
+.topology-legend > span,
+.topology-footer > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.topology-legend strong {
+  margin-left: 3px;
+  color: #cbd5e1;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-weight: 500;
+}
+
+.topology-canvas {
+  position: relative;
+  height: 300px;
+  border-block: 1px solid #202d3d;
+  background: #0c1420;
+}
+
+.topology-panel-expanded .topology-canvas {
+  height: 440px;
+}
+
+.topology-panel .react-flow {
+  --xy-background-color: #0c1420;
+  --xy-controls-button-background-color: #152030;
+  --xy-controls-button-background-color-hover: #203044;
+  --xy-controls-button-color: #b5c4d7;
+  --xy-controls-button-color-hover: #43d5c7;
+  --xy-controls-button-border-color: #293649;
+  --xy-attribution-background-color: #0c1420;
+}
+
+.topology-panel .react-flow__controls {
+  overflow: visible;
+  box-shadow: none;
+  border: 1px solid #293649;
+  border-radius: 6px;
+}
+
+.topology-panel .react-flow__controls-button {
+  width: 29px;
+  height: 29px;
+}
+
+.topology-panel .react-flow__attribution a {
+  color: #8394ab;
+}
+
+.topology-panel .react-flow__node-default {
+  border: 1px solid #38506a;
+  border-radius: 7px;
+  padding: 8px 10px;
+  color: #d3deeb;
+  background: #162333;
+  font-size: 10px;
+}
+
+.topology-panel .react-flow__edge-path {
+  stroke: #66829c;
+  stroke-width: 1.5;
+}
+
+.topology-empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 24px 38px;
+  pointer-events: none;
+  text-align: center;
+}
+
+.topology-empty-icon {
+  display: grid;
+  place-items: center;
+  width: 59px;
+  height: 59px;
+  border: 1px solid #2a3a4e;
+  border-radius: 16px;
+  color: #87a1b9;
+  background: #111e2b;
+  box-shadow: 0 0 0 8px rgb(17 30 43 / 45%);
+  margin-bottom: 5px;
+}
+
+.topology-empty h3 {
+  margin: 0;
+  color: #cad5e3;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.topology-empty p {
+  max-width: 290px;
+  margin: 0;
+  color: #8b9bb0;
+  font-size: 11px;
+  line-height: 1.7;
+}
+
+.topology-footer {
+  display: flex;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 9px;
+  padding: 13px 22px;
+  color: #8b9bb0;
+  font-size: 10px;
+}
+
+.topology-source-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: #7b899d;
+}
+
+.topology-detail {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  max-width: min(260px, calc(100% - 28px));
+  min-width: 180px;
+  border: 1px solid #2b3a4f;
+  border-radius: 9px;
+  padding: 14px;
+  background: #131e2d;
+  color: #cbd5e1;
+  font-size: 12px;
+}
+
+.topology-detail-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.topology-detail-header button {
+  display: inline-flex;
+  justify-content: center;
+  align-items: center;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  padding: 3px;
+  background: transparent;
+  color: #a4b2c6;
+  cursor: pointer;
+}
+
+.topology-detail dl {
+  display: grid;
+  gap: 10px;
+  margin: 14px 0 0;
+}
+
+.topology-detail dl > div {
+  display: grid;
+  grid-template-columns: 40px minmax(0, 1fr);
+  gap: 12px;
+}
+
+.topology-detail dt {
+  color: #8b9bb0;
+}
+
+.topology-detail dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 640px) {
+  .topology-canvas {
+    height: 260px;
+  }
+
+  .topology-panel-expanded .topology-canvas {
+    height: 380px;
+  }
+
+  .topology-legend {
+    padding-inline: 16px;
+    gap: 15px;
+  }
+
+  .topology-footer {
+    padding-inline: 16px;
+  }
+}
